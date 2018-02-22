@@ -1,3 +1,4 @@
+from pathlib import Path
 import numpy as np
 import yaml
 from attrdict import AttrDict
@@ -13,6 +14,14 @@ from ncread import (eh5_open, eh5_close, eh5_info, eh5_read_to_shared,
 
 TEST_HDF_FILE = ('/g/data2/rs0/datacube/002/LS8_OLI_NBAR/4_-35/'
                  'LS8_OLI_NBAR_3577_4_-35_20171107004524000000_v1513646960.nc')
+
+TEST_HDF_STACKED_FILE = ('/g/data2/rs0/datacube/002/LS8_OLI_NBAR/4_-35/'
+                         'LS8_OLI_NBAR_3577_4_-35_2015_v1496400956.nc')
+
+
+if not Path(TEST_HDF_FILE).exists():
+    TEST_HDF_FILE = './sample.nc'
+
 
 def test_1():
     fname = TEST_HDF_FILE
@@ -121,16 +130,17 @@ def read_via_external(fname,
     for roi in block_iterator(read_chunk, ROI, ii.shape):
         (slot, my_view) = slot_alloc(shape_from_slice(roi))
 
-        if slot is not None:
-            future = f.read_to_shared(measurement, roi, slot.offset)
-            future._userdata = (slot, roi, my_view)
-
-            scheduled.add(future)
-        else:
+        while slot is None:
             xx = concurrent.futures.wait(scheduled, return_when='FIRST_COMPLETED')
             for r in xx.done:
                 finalise(r)
             scheduled = xx.not_done
+            (slot, my_view) = slot_alloc(shape_from_slice(roi))
+
+        future = f.read_to_shared(measurement, roi, slot.offset)
+        future._userdata = (slot, roi, my_view)
+
+        scheduled.add(future)
 
     xx = concurrent.futures.wait(scheduled)
     for r in xx.done:
@@ -211,38 +221,50 @@ def read_via_external_mp(fname,
         slot, roi, my_view = r._userdata
         if r.result():
             dst[roi] = my_view
+        else:
+            print('Failed one of the reads:', roi, slot.id)
         slot.release()
 
-    for roi in block_iterator(read_chunk, ROI, ii.shape):
-        (slot, my_view) = slot_alloc(shape_from_slice(roi))
+    def get_slot(shape):
+        nonlocal scheduled
+        (slot, my_view) = slot_alloc(shape)
 
-        if slot is not None:
-            f = choose_target()
-            future = f.read_to_shared(measurement, roi, slot.offset)
-            future._userdata = (slot, roi, my_view)
-
-            scheduled.add(future)
-        else:
+        while slot is None:
             xx = concurrent.futures.wait(scheduled, return_when='FIRST_COMPLETED')
             for r in xx.done:
                 finalise(r)
             scheduled = xx.not_done
+            (slot, my_view) = slot_alloc(shape)
+
+        return (slot, my_view)
+
+    for roi in block_iterator(read_chunk, ROI, ii.shape):
+        (slot, my_view) = get_slot(shape_from_slice(roi))
+        f = choose_target()
+        future = f.read_to_shared(measurement, roi, slot.offset)
+        future._userdata = (slot, roi, my_view)
+        scheduled.add(future)
 
     xx = concurrent.futures.wait(scheduled)
     for r in xx.done:
         finalise(r)
 
-    f.close()
+    for f in ff:
+        f.close()
+
     return dst, procs
 
 
-def test_read_via_external_mp(nprocs=2):
-    print('\nStarting concurrent read test: %d'%(nprocs,))
+def test_read_via_external_mp(nprocs=2, chunk_scale=(1, 2, 2)):
+    print('\nStarting concurrent read test: %d' % (nprocs,))
 
     procs = nprocs
 
     for i, band in enumerate('red green blue nir'.split(' ')):
-        with Timer(message='Read(x%s)::%s 2x2 (%d)' % (nprocs, band, i)):
+        with Timer(message='Read(x%s)::%s %dx%d (%d)' % (nprocs, band,
+                                                         chunk_scale[1],
+                                                         chunk_scale[2],
+                                                         i)):
             dd, procs = read_via_external_mp(TEST_HDF_FILE, band,
                                              chunk_scale=(1, 2, 2),
                                              procs=procs)
@@ -252,7 +274,7 @@ def test_read_via_external_mp(nprocs=2):
 
 
 if __name__ == '__main__':
-    ExternalNetcdfReader.static_init(100*(1<<20))
+    ExternalNetcdfReader.static_init(100*(1 << 20))
     test_read_via_external()
     test_read_via_external_mp(2)
     test_read_via_external_mp(4)
