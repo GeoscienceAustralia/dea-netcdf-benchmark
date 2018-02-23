@@ -119,6 +119,37 @@ def shape_from_slice(sel, shape=None):
     return tuple(size_from_slice(s, n) for s, n in zip(sel, shape))
 
 
+def offset_from_slice(sel, shape=None):
+    def offset(s, n):
+        if s.start is None:
+            return 0
+        if s.start >= 0:
+            return s.start
+        if n is None:
+            raise ValueError("Need to know full shape to deal with relative to end slices")
+        return n + s.start
+
+    if isinstance(sel, slice):
+        return offset(sel, shape)
+
+    if shape is None:
+        return tuple(offset(s, None) for s in sel)
+
+    return tuple(offset(s, n) for s, n in zip(sel, shape))
+
+
+def offset_slice(sel, offset):
+    def offset_slice_1d(sel, offset):
+        start = sel.start + offset if sel.start is not None else offset
+        stop = sel.stop + offset if sel.stop is not None else None
+        return slice(start, stop, sel.step)
+
+    if isinstance(sel, slice):
+        return offset_slice_1d(sel, offset)
+
+    return tuple(offset_slice_1d(s, o) for s, o in zip(sel, offset))
+
+
 def array_memsize(shape, dtype):
     dtype = np.dtype(dtype)
     return functools.reduce(operator.mul, shape)*dtype.itemsize
@@ -289,6 +320,20 @@ def test_shape_from_slice():
 
     assert shape_from_slice(np.s_[-3:-1], (10,)) == (2,)
     # TODO: make this one work:  assert shape_from_slice(np.s_[-3:-1]) == (2,)
+
+
+def test_offset_slice():
+    s_ = np.s_
+    assert offset_from_slice(s_[1:3]) == 1
+    assert offset_from_slice(s_[1:3, :4, 5:]) == (1, 0, 5)
+    assert offset_from_slice(s_[1:3, :4, -3:], (100, 200, 10)) == (1, 0, 7)
+
+    assert offset_slice(s_[1:3], 10) == s_[11:13]
+    assert offset_slice(s_[1:], 10) == s_[11:]
+    assert offset_slice(s_[:], 1) == s_[1:]
+
+    assert offset_slice(s_[1:3, 3:4], (10, 100)) == s_[11:13, 103:104]
+    assert offset_slice(s_[1:3, 3:4, :5], (10, 100, 1000)) == s_[11:13, 103:104, 1000:1005]
 
 
 def test_slot_alloc():
