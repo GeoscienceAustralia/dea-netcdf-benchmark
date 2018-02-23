@@ -98,6 +98,16 @@ def norm_slice(s, n=None):
                  1 if s.step is None else s.step)
 
 
+def norm_selection(sel, shape=None):
+    if isinstance(sel, slice):
+        return norm_slice(sel, shape)
+
+    if shape is None:
+        return tuple(norm_slice(s) for s in sel)
+
+    return tuple(norm_slice(s, n) for s, n in zip(sel, shape))
+
+
 def shape_from_slice(sel, shape=None):
 
     def size_from_slice(s, n):
@@ -148,6 +158,31 @@ def offset_slice(sel, offset):
         return offset_slice_1d(sel, offset)
 
     return tuple(offset_slice_1d(s, o) for s, o in zip(sel, offset))
+
+
+def dst_from_src(src_sel, src_shape=None):
+    is_1d = not isinstance(src_sel, tuple)
+
+    d_offset = offset_from_slice(src_sel, src_shape)
+    if is_1d:
+        d_offset = (d_offset,)
+
+    if functools.reduce(operator.add, d_offset) == 0:
+        return (lambda x: x)
+
+    d_offset = tuple(map(operator.neg, d_offset))
+
+    if is_1d:
+        d_offset = d_offset[0]
+
+    return (lambda sel: offset_slice(sel, d_offset))
+
+
+def select_all(shape):
+    if not isinstance(shape, tuple):
+        return slice(None, None)
+
+    return tuple(slice(None, None) for _ in shape)
 
 
 def array_memsize(shape, dtype):

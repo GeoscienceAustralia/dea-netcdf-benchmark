@@ -6,6 +6,8 @@ from attrdict import AttrDict
 from utils import (NamedObjectCache,
                    Timer,
                    block_iterator,
+                   dst_from_src,
+                   select_all,
                    shape_from_slice)
 
 from ncread import (eh5_open, eh5_close, eh5_info, eh5_read_to_shared,
@@ -21,6 +23,9 @@ TEST_HDF_STACKED_FILE = ('/g/data2/rs0/datacube/002/LS8_OLI_NBAR/4_-35/'
 
 if not Path(TEST_HDF_FILE).exists():
     TEST_HDF_FILE = './sample.nc'
+
+if not Path(TEST_HDF_STACKED_FILE).exists():
+    TEST_HDF_STACKED_FILE = './sample_stacked.nc'
 
 
 def test_1():
@@ -97,6 +102,7 @@ def test_named_cache():
 def read_via_external(fname,
                       measurement,
                       dump_info=False,
+                      src_roi=None,
                       proc=None,
                       chunk_scale=None):
     import concurrent.futures
@@ -107,6 +113,10 @@ def read_via_external(fname,
         print(yaml.dump(f.info))
 
     ii = AttrDict(f.info['vars'][measurement])
+    src_shape = ii.shape
+
+    if src_roi is None:
+        src_roi = select_all(src_shape)
 
     if chunk_scale is None:
         read_chunk = ii.chunks
@@ -118,16 +128,18 @@ def read_via_external(fname,
 
     scheduled = set()
 
-    dst = np.zeros(ii.shape, dtype=ii.dtype)
-    ROI = np.s_[:, :, :]
+    dst_shape = shape_from_slice(src_roi, src_shape)
+    dst_roi = dst_from_src(src_roi, src_shape)
+
+    dst = np.zeros(dst_shape, dtype=ii.dtype)
 
     def finalise(r):
         slot, roi, my_view = r._userdata
         if r.result():
-            dst[roi] = my_view
+            dst[dst_roi(roi)] = my_view
         slot.release()
 
-    for roi in block_iterator(read_chunk, ROI, ii.shape):
+    for roi in block_iterator(read_chunk, src_roi, src_shape):
         (slot, my_view) = slot_alloc(shape_from_slice(roi))
 
         while slot is None:
@@ -168,6 +180,7 @@ def test_read_via_external():
 
 def read_via_external_mp(fname,
                          measurement,
+                         src_roi=None,
                          dump_info=False,
                          procs=None,
                          chunk_scale=None):
@@ -192,6 +205,10 @@ def read_via_external_mp(fname,
         print(yaml.dump(info))
 
     ii = AttrDict(info['vars'][measurement])
+    src_shape = ii.shape
+
+    if src_roi is None:
+        src_roi = select_all(src_shape)
 
     if chunk_scale is None:
         read_chunk = ii.chunks
@@ -203,8 +220,10 @@ def read_via_external_mp(fname,
 
     scheduled = set()
 
-    dst = np.zeros(ii.shape, dtype=ii.dtype)
-    ROI = np.s_[:, :, :]
+    dst_shape = shape_from_slice(src_roi, src_shape)
+    dst_roi = dst_from_src(src_roi, src_shape)
+
+    dst = np.zeros(dst_shape, dtype=ii.dtype)
 
     f_idx = -1
 
@@ -220,7 +239,7 @@ def read_via_external_mp(fname,
     def finalise(r):
         slot, roi, my_view = r._userdata
         if r.result():
-            dst[roi] = my_view
+            dst[dst_roi(roi)] = my_view
         else:
             print('Failed one of the reads:', roi, slot.id)
         slot.release()
@@ -238,7 +257,7 @@ def read_via_external_mp(fname,
 
         return (slot, my_view)
 
-    for roi in block_iterator(read_chunk, ROI, ii.shape):
+    for roi in block_iterator(read_chunk, src_roi, src_shape):
         (slot, my_view) = get_slot(shape_from_slice(roi))
         f = choose_target()
         future = f.read_to_shared(measurement, roi, slot.offset)
@@ -255,7 +274,7 @@ def read_via_external_mp(fname,
     return dst, procs
 
 
-def test_read_via_external_mp(nprocs=2, chunk_scale=(1, 2, 2)):
+def test_read_via_external_mp(nprocs=2, chunk_scale=(1, 2, 2), src_roi=None):
     print('\nStarting concurrent read test: %d' % (nprocs,))
 
     procs = nprocs
@@ -266,6 +285,7 @@ def test_read_via_external_mp(nprocs=2, chunk_scale=(1, 2, 2)):
                                                          chunk_scale[2],
                                                          i)):
             dd, procs = read_via_external_mp(TEST_HDF_FILE, band,
+                                             src_roi=src_roi,
                                              chunk_scale=(1, 2, 2),
                                              procs=procs)
 
