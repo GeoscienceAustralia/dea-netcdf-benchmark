@@ -62,12 +62,16 @@ class ExternalNetcdfReader(object):
     _shared_view = None
 
     @staticmethod
+    def initialised():
+        return ExternalNetcdfReader._shared_view is not None
+
+    @staticmethod
     def static_init(shared_mem_size=DEFAULT_SHARED_MEM_SZ):
         ExternalNetcdfReader._shared_view = SharedBufferView(RawArray('b', shared_mem_size))
 
     @staticmethod
     def mk_proc():
-        if ExternalNetcdfReader._shared_view is None:
+        if ExternalNetcdfReader.initialised() is False:
             ExternalNetcdfReader.static_init()
         return concurrent.futures.ProcessPoolExecutor(max_workers=1)
 
@@ -267,3 +271,97 @@ class NetcdfProcProxy(object):
 
     def read_to_shared(self, varname, roi, offset):
         return self._proc.submit(eh5_read_to_shared, self._fd, varname, roi, offset)
+
+
+class MultiProcNetcdfReader(object):
+
+    class Rdr(object):
+        def __init__(self, fname, procs, view):
+            self._fname = fname
+            self._procs = procs
+            self._view = view
+            self._ff = []
+            self._info = None
+            self._prepare()
+
+        def _prepare(self):
+            ff = []
+            info = None
+            for i, proc in enumerate(self._procs):
+                f = NetcdfProcProxy(self._fname, proc=proc, info=info)
+                ff.append(f)
+                if i == 0:
+                    info = f.info
+
+            self._ff = ff
+            self._info = info
+
+        def read(self, measurements=None,
+                 src_roi=None,
+                 chunk_scale=None):
+            bands = self._info['vars']
+
+            if measurements is None:
+                measurements = list(bands.keys())
+
+            largest_dtype = None
+            for m in measurements:
+                if m not in bands:
+                    raise ValueError('No such measurement')
+
+                dtype = np.dtype(bands[m]['dtype'])
+                if (largest_dtype is None or
+                   dtype.itemsize > largest_dtype.itemsize):
+                    largest_dtype = dtype
+
+            read_chunk = bands[measurements[0]]['chunks']
+            if chunk_scale is not None:
+                read_chunk = tuple(ch*s for ch, s in
+                                   zip(read_chunk, chunk_scale))
+
+            # TODO: should use self._view as backing store
+            slot_alloc, _ = ExternalNetcdfReader.slot_allocator(read_chunk, largest_dtype)
+
+        def close(self):
+            for f in self._ff:
+                f.close()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            self.close()
+
+    def __init__(self, num_workers, mem_sz=None):
+        if mem_sz is not None:
+            if mem_sz < 10000:
+                mem_sz = mem_sz * (1 << 20)  # Assume in Mb, convert to bytes
+
+            if ExternalNetcdfReader.initialised() is False:
+                ExternalNetcdfReader.static_init(mem_sz)
+            elif len(ExternalNetcdfReader._shared_view.buffer) < mem_sz:
+                # TODO: assumes no one is using it already
+                ExternalNetcdfReader.static_init(mem_sz)
+
+        self._shared_view = ExternalNetcdfReader._shared_view
+        self._procs = [ExternalNetcdfReader.mk_proc() for _ in range(num_workers)]
+        pass
+
+    def open(self, fname):
+        return MultiProcNetcdfReader.Rdr(fname,
+                                         self._procs,
+                                         self._shared_view)
+
+
+def test_multi():
+    fname = "sample.nc"
+
+    mpr = MultiProcNetcdfReader(2)
+
+    f = mpr.open(fname)
+
+    print(f._ff)
+    f.close()
+
+    with mpr.open(fname) as f:
+        print(f._info)
