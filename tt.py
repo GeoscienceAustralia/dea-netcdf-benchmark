@@ -111,10 +111,16 @@ def read_via_external(fname,
                       measurement,
                       dump_info=False,
                       src_roi=None,
-                      proc=None,
                       state=None,
+                      proc=None,
                       chunk_scale=None):
     import concurrent.futures
+
+    if state is None:
+        state = SharedState()
+
+    if proc is None:
+        proc = state.make_procs(1)[0]
 
     f = NetcdfProcProxy(fname, proc=proc)
 
@@ -168,23 +174,21 @@ def read_via_external(fname,
         finalise(r)
 
     f.close()
-    return dst, f.proc
+    return dst, state, f.proc
 
 
 def test_read_via_external():
     print('\nStarting read test')
 
-    state = SharedState()
-
     with Timer(message='Prepare'):
+        state = SharedState()
         proc = state.make_procs(1)[0]
 
     for i, band in enumerate('red green blue nir'.split(' ')):
         with Timer(message='Read::%s 2x2 (%d)' % (band, i)):
-            dd, proc = read_via_external(TEST_HDF_FILE, band,
-                                         chunk_scale=(1, 2, 2),
-                                         state=state,
-                                         proc=proc)
+            dd, state, proc = read_via_external(TEST_HDF_FILE, band,
+                                                chunk_scale=(1, 2, 2),
+                                                state=state, proc=proc)
 
             assert dd.shape == (1, 4000, 4000)
             print(dd.shape, dd.dtype)
@@ -194,8 +198,8 @@ def read_via_external_mp(fname,
                          measurement,
                          src_roi=None,
                          dump_info=False,
-                         procs=None,
                          state=None,
+                         procs=None,
                          chunk_scale=None):
     import concurrent.futures
 
@@ -290,24 +294,30 @@ def read_via_external_mp(fname,
     return dst, state, procs
 
 
-def test_read_via_external_mp(nprocs=2, chunk_scale=(1, 2, 2), src_roi=None):
-    print('\nStarting concurrent read test: %d' % (nprocs,))
+def test_read_via_external_mp(nprocs=2,
+                              fname=TEST_HDF_FILE,
+                              measurements='red green blue nir'.split(' '),
+                              chunk_scale=(1, 2, 2),
+                              src_roi=None):
+    print('\nStarting concurrent read test: %d\n %s' % (nprocs, fname))
 
     state = None
     procs = nprocs
+    out = {}
 
-    for i, band in enumerate('red green blue nir'.split(' ')):
+    for i, band in enumerate(measurements):
         with Timer(message='Read(x%s)::%s %dx%d (%d)' % (nprocs, band,
                                                          chunk_scale[1],
                                                          chunk_scale[2],
                                                          i)):
-            dd, state, procs = read_via_external_mp(TEST_HDF_FILE, band,
+            dd, state, procs = read_via_external_mp(fname, band,
                                                     src_roi=src_roi,
                                                     chunk_scale=(1, 2, 2),
                                                     state=state, procs=procs)
 
-            assert dd.shape == (1, 4000, 4000)
             print(dd.shape, dd.dtype)
+            out[band] = dd
+    return out
 
 
 if __name__ == '__main__':
