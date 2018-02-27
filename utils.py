@@ -267,10 +267,13 @@ class ChunkStoreAlloc(object):
                 self._ondone = None
                 self._id = None
 
-    def __init__(self, chunk_sz, buf):
-        self._view = SharedBufferView(buf)
+    def __init__(self, chunk_sz, view):
+        if not isinstance(view, SharedBufferView):
+            view = SharedBufferView(view)
+
+        self._view = view
         self._chunk_sz = chunk_sz
-        self._n = len(buf)//chunk_sz
+        self._n = len(view.buffer)//chunk_sz
         self._free = [i for i in range(self._n)]
 
     @property
