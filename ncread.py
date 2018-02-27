@@ -3,6 +3,7 @@ import numpy as np
 import logging
 from multiprocessing.sharedctypes import RawArray
 import concurrent.futures
+import threading
 
 from utils import (NamedObjectCache,
                    shape_from_slice,
@@ -151,40 +152,37 @@ class ExternalNetcdfReader(object):
 class SharedState(object):
     DEFAULT_SHARED_MEM_SZ = 40*(1 << 20)
     _shared_view = None
+    _launch_lock = threading.Lock()
 
-    @staticmethod
-    def initialised():
-        return SharedState._shared_view is not None
+    def __init__(self, view=None, mb=None):
+        if view is not None:
+            self._view = view
+        elif mb is not None:
+            self._view = SharedBufferView(RawArray('b', mb*(1 << 20)))
+        else:
+            self._view = SharedBufferView(RawArray('b', SharedState.DEFAULT_SHARED_MEM_SZ))
 
-    @staticmethod
-    def static_init(shared_mem_size=DEFAULT_SHARED_MEM_SZ):
-        SharedState._shared_view = SharedBufferView(RawArray('b', shared_mem_size))
+    @property
+    def view(self):
+        return self._view
 
-    @staticmethod
-    def mk_proc():
-        if SharedState.initialised() is False:
-            SharedState.static_init()
-        return concurrent.futures.ProcessPoolExecutor(max_workers=1)
+    def make_procs(self, num_workers):
+        with SharedState._launch_lock:
+            # TODO: rather than putting it into this global slot give it a name and pass it through NamedObjectCache
+            #       see eh5_open
+            SharedState._shared_view = self._view
+            return [concurrent.futures.ProcessPoolExecutor(max_workers=1) for _ in range(num_workers)]
 
-    @staticmethod
-    def slot_allocator(chunk_shape, dtype, cache=None):
-        # TODO: only one allocator is assumed to exists/be used at a time,
-        # need to enforce it
+    def slot_allocator(self, chunk_shape, dtype):
+        chunk_sz = array_memsize(chunk_shape, dtype)
 
-        if cache is None:
-            chunk_sz = array_memsize(chunk_shape, dtype)
-
-            if SharedState._shared_view is None:
-                SharedState.static_init()
-
-            cache = ChunkStoreAlloc(chunk_sz,
-                                    SharedState._shared_view.buffer)
+        cache = ChunkStoreAlloc(chunk_sz, self._view)
 
         if cache.check_size(chunk_shape, dtype) is False:
             _LOG.error('Requested chunk size is too large')
             return None, cache
 
-        def alloc(shape=chunk_shape):
+        def alloc(shape=chunk_shape, dtype=dtype):
             empty = (None, None)
 
             slot = cache.alloc()
@@ -203,8 +201,11 @@ class SharedState(object):
         return alloc, cache
 
 
-def eh5_open(fname):
-    view = SharedState._shared_view
+def eh5_open(fname, view=None):
+    if view is None:
+        view = SharedState._shared_view
+        if view is None:
+            return -2
 
     try:
         (fd, _) = NamedObjectCache(lambda fname: ExternalNetcdfReader(fname, view))(fname)
@@ -238,12 +239,9 @@ def eh5_close(fd):
 
 
 class NetcdfProcProxy(object):
-    def __init__(self, fname, proc=None, info=None):
+    def __init__(self, fname, proc, info=None):
         self._fd = -1
-        self._proc = None
-
-        if proc is None:
-            proc = SharedState.mk_proc()
+        self._proc = proc
 
         fd = proc.submit(eh5_open, fname)
         fd = fd.result()

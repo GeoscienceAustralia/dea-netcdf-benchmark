@@ -30,10 +30,12 @@ if not Path(TEST_HDF_STACKED_FILE).exists():
 
 
 def test_1():
+    st = SharedState(mb=1)
+
     fname = TEST_HDF_FILE
-    fd1 = eh5_open(fname)
+    fd1 = eh5_open(fname, st.view)
     assert fd1 > 0
-    fd2 = eh5_open(fname)
+    fd2 = eh5_open(fname, st.view)
     print(fd1, fd2)
     assert fd1 == fd2
 
@@ -44,7 +46,9 @@ def test_1():
 def test_external_eh5_pp_shared():
     fname = TEST_HDF_FILE
 
-    pp = SharedState.mk_proc()
+    st = SharedState()
+
+    pp = st.make_procs(1)[0]
 
     fd = pp.submit(eh5_open, fname)
     fd = fd.result()
@@ -58,7 +62,7 @@ def test_external_eh5_pp_shared():
     varname = 'blue'
     ii = AttrDict(info['vars'][varname])
 
-    slot_alloc, _ = SharedState.slot_allocator(ii.chunks, ii.dtype)
+    slot_alloc, _ = st.slot_allocator(ii.chunks, ii.dtype)
     assert slot_alloc is not None
 
     (slot, my_view) = slot_alloc()
@@ -73,7 +77,8 @@ def test_external_eh5_pp_shared():
 
 
 def test_slot_alloc():
-    slot_alloc, _ = SharedState.slot_allocator((1, 200, 200), 'int16')
+    st = SharedState()
+    slot_alloc, _ = st.slot_allocator((1, 200, 200), 'int16')
     assert slot_alloc is not None
 
     (s1, a1) = slot_alloc()
@@ -84,7 +89,8 @@ def test_slot_alloc():
 
 def test_named_cache():
     fname = TEST_HDF_FILE
-    view = SharedState._shared_view
+    st = SharedState()
+    view = st.view
 
     for i in range(3):
         fd, obj = NamedObjectCache(lambda fname: ExternalNetcdfReader(fname, view))(fname)
@@ -106,6 +112,7 @@ def read_via_external(fname,
                       dump_info=False,
                       src_roi=None,
                       proc=None,
+                      state=None,
                       chunk_scale=None):
     import concurrent.futures
 
@@ -125,7 +132,7 @@ def read_via_external(fname,
     else:
         read_chunk = tuple(ch*s for ch, s in zip(ii.chunks, chunk_scale))
 
-    slot_alloc, _ = SharedState.slot_allocator(read_chunk, ii.dtype)
+    slot_alloc, _ = state.slot_allocator(read_chunk, ii.dtype)
     assert slot_alloc is not None
 
     scheduled = set()
@@ -167,13 +174,16 @@ def read_via_external(fname,
 def test_read_via_external():
     print('\nStarting read test')
 
+    state = SharedState()
+
     with Timer(message='Prepare'):
-        proc = SharedState.mk_proc()
+        proc = state.make_procs(1)[0]
 
     for i, band in enumerate('red green blue nir'.split(' ')):
         with Timer(message='Read::%s 2x2 (%d)' % (band, i)):
             dd, proc = read_via_external(TEST_HDF_FILE, band,
                                          chunk_scale=(1, 2, 2),
+                                         state=state,
                                          proc=proc)
 
             assert dd.shape == (1, 4000, 4000)
@@ -185,14 +195,18 @@ def read_via_external_mp(fname,
                          src_roi=None,
                          dump_info=False,
                          procs=None,
+                         state=None,
                          chunk_scale=None):
     import concurrent.futures
+
+    if state is None:
+        state = SharedState()
 
     if procs is None:
         procs = 1
 
     if isinstance(procs, int):
-        procs = [SharedState.mk_proc() for _ in range(procs)]
+        procs = state.make_procs(procs)
 
     ff = []
     info = None
@@ -217,7 +231,7 @@ def read_via_external_mp(fname,
     else:
         read_chunk = tuple(ch*s for ch, s in zip(ii.chunks, chunk_scale))
 
-    slot_alloc, _ = SharedState.slot_allocator(read_chunk, ii.dtype)
+    slot_alloc, _ = state.slot_allocator(read_chunk, ii.dtype)
     assert slot_alloc is not None
 
     scheduled = set()
@@ -273,12 +287,13 @@ def read_via_external_mp(fname,
     for f in ff:
         f.close()
 
-    return dst, procs
+    return dst, state, procs
 
 
 def test_read_via_external_mp(nprocs=2, chunk_scale=(1, 2, 2), src_roi=None):
     print('\nStarting concurrent read test: %d' % (nprocs,))
 
+    state = None
     procs = nprocs
 
     for i, band in enumerate('red green blue nir'.split(' ')):
@@ -286,17 +301,16 @@ def test_read_via_external_mp(nprocs=2, chunk_scale=(1, 2, 2), src_roi=None):
                                                          chunk_scale[1],
                                                          chunk_scale[2],
                                                          i)):
-            dd, procs = read_via_external_mp(TEST_HDF_FILE, band,
-                                             src_roi=src_roi,
-                                             chunk_scale=(1, 2, 2),
-                                             procs=procs)
+            dd, state, procs = read_via_external_mp(TEST_HDF_FILE, band,
+                                                    src_roi=src_roi,
+                                                    chunk_scale=(1, 2, 2),
+                                                    state=state, procs=procs)
 
             assert dd.shape == (1, 4000, 4000)
             print(dd.shape, dd.dtype)
 
 
 if __name__ == '__main__':
-    SharedState.static_init(100*(1 << 20))
     test_read_via_external()
     test_read_via_external_mp(2)
     test_read_via_external_mp(4)
