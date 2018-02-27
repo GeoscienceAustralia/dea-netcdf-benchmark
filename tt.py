@@ -1,7 +1,6 @@
 from pathlib import Path
 import numpy as np
 import yaml
-from attrdict import AttrDict
 
 from utils import (NamedObjectCache,
                    Timer,
@@ -10,8 +9,7 @@ from utils import (NamedObjectCache,
                    select_all,
                    shape_from_slice)
 
-from ncread import (eh5_open, eh5_close, eh5_info, eh5_read_to_shared,
-                    NetcdfProcProxy,
+from ncread import (NetcdfProcProxy,
                     ExternalNetcdfReader,
                     SharedState)
 
@@ -30,6 +28,7 @@ if not Path(TEST_HDF_STACKED_FILE).exists():
 
 
 def test_1():
+    from ncread import eh5_open, eh5_close
     st = SharedState(mb=1)
 
     fname = TEST_HDF_FILE
@@ -41,39 +40,6 @@ def test_1():
 
     assert eh5_close(fd1) is True
     assert eh5_close(fd1) is False
-
-
-def test_external_eh5_pp_shared():
-    fname = TEST_HDF_FILE
-
-    st = SharedState()
-
-    pp = st.make_procs(1)[0]
-
-    fd = pp.submit(eh5_open, fname)
-    fd = fd.result()
-
-    assert fd > 0
-
-    info = pp.submit(eh5_info, fd)
-    info = info.result()
-    print(yaml.dump(info))
-
-    varname = 'blue'
-    ii = AttrDict(info['vars'][varname])
-
-    slot_alloc, _ = st.slot_allocator(ii.chunks, ii.dtype)
-    assert slot_alloc is not None
-
-    (slot, my_view) = slot_alloc()
-
-    assert slot is not None
-
-    roi = np.s_[0, 1000:1200, 2000:2200]
-    r = pp.submit(eh5_read_to_shared, fd, varname, roi, slot.offset)
-    print(r.result())
-    print(my_view)
-    slot.release()
 
 
 def test_slot_alloc():
@@ -127,7 +93,7 @@ def read_via_external(fname,
     if dump_info:
         print(yaml.dump(f.info))
 
-    ii = AttrDict(f.info['vars'][measurement])
+    ii = f.info.vars[measurement]
     src_shape = ii.shape
 
     if src_roi is None:
@@ -224,7 +190,7 @@ def read_via_external_mp(fname,
     if dump_info:
         print(yaml.dump(info))
 
-    ii = AttrDict(info['vars'][measurement])
+    ii = info.vars[measurement]
     src_shape = ii.shape
 
     if src_roi is None:

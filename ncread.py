@@ -4,6 +4,7 @@ import logging
 from multiprocessing.sharedctypes import RawArray
 import concurrent.futures
 import threading
+from collections import namedtuple
 
 from utils import (NamedObjectCache,
                    shape_from_slice,
@@ -13,6 +14,23 @@ from utils import (NamedObjectCache,
 
 warnings.filterwarnings('ignore', module="h5py")
 _LOG = logging.getLogger(__name__)
+
+NetcdfFileInfo = namedtuple('NetcdfFileInfo', ['vars', 'dims', 'grids'])
+DimensionInfo = namedtuple('DimensionInfo', ['shape', 'dtype'])
+VariableInfo = namedtuple('VariableInfo', ['shape', 'dtype', 'dims', 'chunks', 'grid_mapping', 'nodata'])
+
+
+def _parse_info(info_dict):
+    """ Converts dictionaries into named tuples
+    """
+    def mk_var_info(shape=None, dtype=None, dims=None, chunks=None, grid_mapping=None, nodata=None):
+        return VariableInfo(**locals())
+
+    vars = {k: mk_var_info(**v) for k, v in info_dict['vars'].items()}
+    dims = {k: DimensionInfo(**v) for k, v in info_dict['dims'].items()}
+    grids = info_dict.get('grids')
+
+    return NetcdfFileInfo(vars=vars, dims=dims, grids=grids)
 
 
 def h5_utf8_attr(f, name):
@@ -53,7 +71,7 @@ def h5_extract_attrs(ds, keys=None, unwrap_arrays=False):
         return safe_extract(keys)
 
     if keys is None:
-        keys = ds.attrs.keys()
+        keys = list(ds.attrs)
 
     return {k: safe_extract(k) for k in keys}
 
@@ -108,7 +126,7 @@ class ExternalNetcdfReader(object):
             return ds.attrs.get('DIMENSION_LIST') is not None
 
         def nc_dims(ds):
-            return [ds.file[ref[0]].name.split('/')[-1] for ref in ds.attrs['DIMENSION_LIST']]
+            return tuple(ds.file[ref[0]].name.split('/')[-1] for ref in ds.attrs['DIMENSION_LIST'])
 
         def describe_var(ds):
             props = dict(shape=ds.shape,
@@ -256,6 +274,8 @@ class NetcdfProcProxy(object):
             if info is None:
                 raise IOError('Failed to query info about the file: "%s"', fname)
 
+            info = _parse_info(info)
+
         self._proc = proc
         self._fd = fd
         self._info = info
@@ -275,84 +295,96 @@ class NetcdfProcProxy(object):
         return self._proc.submit(eh5_read_to_shared, self._fd, varname, roi, offset)
 
 
-class MultiProcNetcdfReader(object):
+class _MultiProcNetcdfReader(object):
+    def __init__(self, fname, procs, state):
+        self._fname = fname
+        self._procs = procs
+        self._state = state
+        self._ff = []
+        self._info = None
+        self._prepare()
 
-    class Rdr(object):
-        def __init__(self, fname, procs, view):
-            self._fname = fname
-            self._procs = procs
-            self._view = view
-            self._ff = []
-            self._info = None
-            self._prepare()
+    def _prepare(self):
+        ff = []
+        info = None
+        for i, proc in enumerate(self._procs):
+            f = NetcdfProcProxy(self._fname, proc=proc, info=info)
+            ff.append(f)
+            if i == 0:
+                info = f.info
 
-        def _prepare(self):
-            ff = []
-            info = None
-            for i, proc in enumerate(self._procs):
-                f = NetcdfProcProxy(self._fname, proc=proc, info=info)
-                ff.append(f)
-                if i == 0:
-                    info = f.info
+        self._ff = ff
+        self._info = info
 
-            self._ff = ff
-            self._info = info
+    def _check_measurements(self, measurements):
+        bands = self._info.vars
 
-        def read(self, measurements=None,
-                 src_roi=None,
-                 chunk_scale=None):
-            bands = self._info['vars']
+        if isinstance(measurements, str):
+            measurements = [measurements]
 
-            if measurements is None:
-                measurements = list(bands.keys())
-
-            largest_dtype = None
+        if measurements is None:
+            measurements = [k for k in bands if k != 'dataset']  # TODO: GA specifics 'dataset'
+        else:
             for m in measurements:
                 if m not in bands:
-                    raise ValueError('No such measurement')
+                    raise ValueError('No such measurement: ' + m)
 
-                dtype = np.dtype(bands[m]['dtype'])
-                if (largest_dtype is None or
-                   dtype.itemsize > largest_dtype.itemsize):
-                    largest_dtype = dtype
+        shapes = set(map(lambda m: bands[m].shape, measurements))
+        if len(shapes) != 1:
+            raise ValueError('Expect all requested bands to have the same shape')
 
-            read_chunk = bands[measurements[0]]['chunks']
-            if chunk_scale is not None:
-                read_chunk = tuple(ch*s for ch, s in
-                                   zip(read_chunk, chunk_scale))
+        return measurements, shapes.pop()
 
-            # TODO: should use self._view as backing store
-            slot_alloc, _ = ExternalNetcdfReader.slot_allocator(read_chunk, largest_dtype)
+    def _init_alloc(self, measurements, chunk_scale):
+        bands = self._info.vars
 
-        def close(self):
-            for f in self._ff:
-                f.close()
+        dtypes = map(lambda m: np.dtype(bands[m].dtype), measurements)
+        dtypes = sorted(dtypes, key=lambda dtype: dtype.itemsize, reverse=True)
+        largest_dtype = dtypes[0]
 
-        def __enter__(self):
-            return self
+        read_chunk = bands[measurements[0]].chunks
+        if chunk_scale is not None:
+            read_chunk = tuple(ch*s for ch, s in
+                               zip(read_chunk, chunk_scale))
 
-        def __exit__(self, *args):
-            self.close()
+        slot_alloc, _ = self._state.slot_allocator(read_chunk, largest_dtype)
 
-    def __init__(self, num_workers, mem_sz=None):
-        if mem_sz is not None:
-            if mem_sz < 10000:
-                mem_sz = mem_sz * (1 << 20)  # Assume in Mb, convert to bytes
+        return slot_alloc, read_chunk
 
-            if SharedState.initialised() is False:
-                SharedState.static_init(mem_sz)
-            elif len(SharedState._shared_view.buffer) < mem_sz:
-                # TODO: assumes no one is using it already
-                SharedState.static_init(mem_sz)
+    def read(self, measurements=None,
+             src_roi=None,
+             chunk_scale=None):
+        from utils import select_all
 
-        self._shared_view = SharedState._shared_view
-        self._procs = [SharedState.mk_proc() for _ in range(num_workers)]
+        measurements, src_shape = self._check_measurements(measurements)
+
+        if src_roi is None:
+            src_roi = select_all(src_shape)
+
+        slot_alloc, read_chunk = self._init_alloc(measurements, chunk_scale)
+
+        return slot_alloc, read_chunk
+
+    def close(self):
+        for f in self._ff:
+            f.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        self.close()
+
+
+class MultiProcNetcdfReader(object):
+
+    def __init__(self, num_workers, mb=None):
+        self._state = SharedState(mb=mb)
+        self._procs = self._state.make_procs(num_workers)
         pass
 
     def open(self, fname):
-        return MultiProcNetcdfReader.Rdr(fname,
-                                         self._procs,
-                                         self._shared_view)
+        return _MultiProcNetcdfReader(fname, self._procs, self._state)
 
 
 def test_multi():
@@ -367,3 +399,7 @@ def test_multi():
 
     with mpr.open(fname) as f:
         print(f._info)
+
+        xx = f.read()
+        print(xx)
+        assert xx is not None
