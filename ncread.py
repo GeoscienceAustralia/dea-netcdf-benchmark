@@ -58,63 +58,10 @@ def h5_extract_attrs(ds, keys=None, unwrap_arrays=False):
 
 
 class ExternalNetcdfReader(object):
-    DEFAULT_SHARED_MEM_SZ = 40*(1 << 20)
-    _shared_view = None
-
-    @staticmethod
-    def initialised():
-        return ExternalNetcdfReader._shared_view is not None
-
-    @staticmethod
-    def static_init(shared_mem_size=DEFAULT_SHARED_MEM_SZ):
-        ExternalNetcdfReader._shared_view = SharedBufferView(RawArray('b', shared_mem_size))
-
-    @staticmethod
-    def mk_proc():
-        if ExternalNetcdfReader.initialised() is False:
-            ExternalNetcdfReader.static_init()
-        return concurrent.futures.ProcessPoolExecutor(max_workers=1)
-
-    @staticmethod
-    def slot_allocator(chunk_shape, dtype, cache=None):
-        # TODO: only one allocator is assumed to exists/be used at a time,
-        # need to enforce it
-
-        if cache is None:
-            chunk_sz = array_memsize(chunk_shape, dtype)
-
-            if ExternalNetcdfReader._shared_view is None:
-                ExternalNetcdfReader.static_init()
-
-            cache = ChunkStoreAlloc(chunk_sz,
-                                    ExternalNetcdfReader._shared_view.buffer)
-
-        if cache.check_size(chunk_shape, dtype) is False:
-            _LOG.error('Requested chunk size is too large')
-            return None, cache
-
-        def alloc(shape=chunk_shape):
-            empty = (None, None)
-
-            slot = cache.alloc()
-            if slot is None:
-                return empty
-
-            a = cache.asarray(slot, shape, dtype)
-
-            if a is None:
-                del slot
-                _LOG.error('Something went wrong: chunk is too small suddenly')
-                raise ValueError('Shape too big I guess, or unexpected state changes')
-
-            return (slot, a)
-
-        return alloc, cache
-
-    def __init__(self, fname):
+    def __init__(self, fname, view):
         import h5py
 
-        self._view = ExternalNetcdfReader._shared_view
+        self._view = view
         self._f = None
         try:
             self._f = h5py.File(fname, 'r')
@@ -201,9 +148,66 @@ class ExternalNetcdfReader(object):
                     grids=grids)
 
 
+class SharedState(object):
+    DEFAULT_SHARED_MEM_SZ = 40*(1 << 20)
+    _shared_view = None
+
+    @staticmethod
+    def initialised():
+        return SharedState._shared_view is not None
+
+    @staticmethod
+    def static_init(shared_mem_size=DEFAULT_SHARED_MEM_SZ):
+        SharedState._shared_view = SharedBufferView(RawArray('b', shared_mem_size))
+
+    @staticmethod
+    def mk_proc():
+        if SharedState.initialised() is False:
+            SharedState.static_init()
+        return concurrent.futures.ProcessPoolExecutor(max_workers=1)
+
+    @staticmethod
+    def slot_allocator(chunk_shape, dtype, cache=None):
+        # TODO: only one allocator is assumed to exists/be used at a time,
+        # need to enforce it
+
+        if cache is None:
+            chunk_sz = array_memsize(chunk_shape, dtype)
+
+            if SharedState._shared_view is None:
+                SharedState.static_init()
+
+            cache = ChunkStoreAlloc(chunk_sz,
+                                    SharedState._shared_view.buffer)
+
+        if cache.check_size(chunk_shape, dtype) is False:
+            _LOG.error('Requested chunk size is too large')
+            return None, cache
+
+        def alloc(shape=chunk_shape):
+            empty = (None, None)
+
+            slot = cache.alloc()
+            if slot is None:
+                return empty
+
+            a = cache.asarray(slot, shape, dtype)
+
+            if a is None:
+                del slot
+                _LOG.error('Something went wrong: chunk is too small suddenly')
+                raise ValueError('Shape too big I guess, or unexpected state changes')
+
+            return (slot, a)
+
+        return alloc, cache
+
+
 def eh5_open(fname):
+    view = SharedState._shared_view
+
     try:
-        (fd, _) = NamedObjectCache(ExternalNetcdfReader)(fname)
+        (fd, _) = NamedObjectCache(lambda fname: ExternalNetcdfReader(fname, view))(fname)
     except IOError as e:
         return -1
 
@@ -239,7 +243,7 @@ class NetcdfProcProxy(object):
         self._proc = None
 
         if proc is None:
-            proc = ExternalNetcdfReader.mk_proc()
+            proc = SharedState.mk_proc()
 
         fd = proc.submit(eh5_open, fname)
         fd = fd.result()
@@ -337,14 +341,14 @@ class MultiProcNetcdfReader(object):
             if mem_sz < 10000:
                 mem_sz = mem_sz * (1 << 20)  # Assume in Mb, convert to bytes
 
-            if ExternalNetcdfReader.initialised() is False:
-                ExternalNetcdfReader.static_init(mem_sz)
-            elif len(ExternalNetcdfReader._shared_view.buffer) < mem_sz:
+            if SharedState.initialised() is False:
+                SharedState.static_init(mem_sz)
+            elif len(SharedState._shared_view.buffer) < mem_sz:
                 # TODO: assumes no one is using it already
-                ExternalNetcdfReader.static_init(mem_sz)
+                SharedState.static_init(mem_sz)
 
-        self._shared_view = ExternalNetcdfReader._shared_view
-        self._procs = [ExternalNetcdfReader.mk_proc() for _ in range(num_workers)]
+        self._shared_view = SharedState._shared_view
+        self._procs = [SharedState.mk_proc() for _ in range(num_workers)]
         pass
 
     def open(self, fname):

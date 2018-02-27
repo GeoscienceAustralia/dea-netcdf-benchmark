@@ -12,7 +12,8 @@ from utils import (NamedObjectCache,
 
 from ncread import (eh5_open, eh5_close, eh5_info, eh5_read_to_shared,
                     NetcdfProcProxy,
-                    ExternalNetcdfReader)
+                    ExternalNetcdfReader,
+                    SharedState)
 
 TEST_HDF_FILE = ('/g/data2/rs0/datacube/002/LS8_OLI_NBAR/4_-35/'
                  'LS8_OLI_NBAR_3577_4_-35_20171107004524000000_v1513646960.nc')
@@ -43,7 +44,7 @@ def test_1():
 def test_external_eh5_pp_shared():
     fname = TEST_HDF_FILE
 
-    pp = ExternalNetcdfReader.mk_proc()
+    pp = SharedState.mk_proc()
 
     fd = pp.submit(eh5_open, fname)
     fd = fd.result()
@@ -57,7 +58,7 @@ def test_external_eh5_pp_shared():
     varname = 'blue'
     ii = AttrDict(info['vars'][varname])
 
-    slot_alloc, _ = ExternalNetcdfReader.slot_allocator(ii.chunks, ii.dtype)
+    slot_alloc, _ = SharedState.slot_allocator(ii.chunks, ii.dtype)
     assert slot_alloc is not None
 
     (slot, my_view) = slot_alloc()
@@ -72,7 +73,7 @@ def test_external_eh5_pp_shared():
 
 
 def test_slot_alloc():
-    slot_alloc, _ = ExternalNetcdfReader.slot_allocator((1, 200, 200), 'int16')
+    slot_alloc, _ = SharedState.slot_allocator((1, 200, 200), 'int16')
     assert slot_alloc is not None
 
     (s1, a1) = slot_alloc()
@@ -83,9 +84,10 @@ def test_slot_alloc():
 
 def test_named_cache():
     fname = TEST_HDF_FILE
+    view = SharedState._shared_view
 
     for i in range(3):
-        fd, obj = NamedObjectCache(ExternalNetcdfReader)(fname)
+        fd, obj = NamedObjectCache(lambda fname: ExternalNetcdfReader(fname, view))(fname)
         print('FD:', fd, obj)
         obj = NamedObjectCache(None).lookup(fd)
         print('...', obj)
@@ -123,7 +125,7 @@ def read_via_external(fname,
     else:
         read_chunk = tuple(ch*s for ch, s in zip(ii.chunks, chunk_scale))
 
-    slot_alloc, _ = ExternalNetcdfReader.slot_allocator(read_chunk, ii.dtype)
+    slot_alloc, _ = SharedState.slot_allocator(read_chunk, ii.dtype)
     assert slot_alloc is not None
 
     scheduled = set()
@@ -166,7 +168,7 @@ def test_read_via_external():
     print('\nStarting read test')
 
     with Timer(message='Prepare'):
-        proc = ExternalNetcdfReader.mk_proc()
+        proc = SharedState.mk_proc()
 
     for i, band in enumerate('red green blue nir'.split(' ')):
         with Timer(message='Read::%s 2x2 (%d)' % (band, i)):
@@ -190,7 +192,7 @@ def read_via_external_mp(fname,
         procs = 1
 
     if isinstance(procs, int):
-        procs = [ExternalNetcdfReader.mk_proc() for _ in range(procs)]
+        procs = [SharedState.mk_proc() for _ in range(procs)]
 
     ff = []
     info = None
@@ -215,7 +217,7 @@ def read_via_external_mp(fname,
     else:
         read_chunk = tuple(ch*s for ch, s in zip(ii.chunks, chunk_scale))
 
-    slot_alloc, _ = ExternalNetcdfReader.slot_allocator(read_chunk, ii.dtype)
+    slot_alloc, _ = SharedState.slot_allocator(read_chunk, ii.dtype)
     assert slot_alloc is not None
 
     scheduled = set()
@@ -294,7 +296,7 @@ def test_read_via_external_mp(nprocs=2, chunk_scale=(1, 2, 2), src_roi=None):
 
 
 if __name__ == '__main__':
-    ExternalNetcdfReader.static_init(100*(1 << 20))
+    SharedState.static_init(100*(1 << 20))
     test_read_via_external()
     test_read_via_external_mp(2)
     test_read_via_external_mp(4)
