@@ -172,6 +172,10 @@ class SharedState(object):
     _shared_view = None
     _launch_lock = threading.Lock()
 
+    @staticmethod
+    def _check_buf():
+        return SharedState._shared_view is not None
+
     def __init__(self, view=None, mb=None):
         if view is not None:
             self._view = view
@@ -189,7 +193,17 @@ class SharedState(object):
             # TODO: rather than putting it into this global slot give it a name and pass it through NamedObjectCache
             #       see eh5_open
             SharedState._shared_view = self._view
-            return [concurrent.futures.ProcessPoolExecutor(max_workers=1) for _ in range(num_workers)]
+            pp = [concurrent.futures.ProcessPoolExecutor(max_workers=1) for _ in range(num_workers)]
+
+            # ensure that processes are launched and global state can be released in the main process
+            ff = concurrent.futures.wait([p.submit(SharedState._check_buf) for p in pp])
+            results = list(r.result() for r in ff.done)
+            SharedBufferView._shared_view = None
+
+        if set(results) != set([True]):
+            raise RuntimeError('Failed to share work buffer with worker processes')
+
+        return pp
 
     def slot_allocator(self, chunk_shape, dtype):
         chunk_sz = array_memsize(chunk_shape, dtype)
