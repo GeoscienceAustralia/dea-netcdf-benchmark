@@ -235,6 +235,7 @@ class SharedState(object):
 
 
 def eh5_open(fname, view=None):
+    # pylint: disable=protected-access
     if view is None:
         view = SharedState._shared_view
         if view is None:
@@ -346,6 +347,7 @@ class _MultiProcNetcdfReader(object):
         self._state = state
         self._ff = []
         self._info = None
+        self._scheduled = None
         self._prepare()
 
     def _prepare(self):
@@ -396,19 +398,85 @@ class _MultiProcNetcdfReader(object):
         slot_alloc, _ = self._state.slot_allocator(read_chunk, largest_dtype)
         return slot_alloc, read_chunk
 
+    def _pack_user_data(self, future, slot, roi, my_view, dst):
+        # pylint: disable=protected-access
+        future._userdata = (slot, roi, my_view, dst)
+        return future
+
+    def _unpack_user_data(self, future):
+        # pylint: disable=protected-access
+        slot, roi, my_view, dst = future._userdata
+        return (slot, roi, my_view, dst)
+
+    def _finalise(self, future):
+        ok = False
+        slot, roi, my_view, dst = self._unpack_user_data(future)
+        try:
+            if future.result():
+                dst[roi] = my_view
+                ok = True
+            else:
+                _LOG.error('Failed one of the reads: %s %d', repr(roi), slot.id)
+        except Exception as e:  # pylint: disable=broad-except
+            _LOG.error('Failed with exception one of the reads: %s %d', repr(roi), slot.id)
+        finally:
+            slot.release()
+
+        return ok
+
+    def _process_results(self, timeout=None, all_completed=False):
+        return_when = 'ALL_COMPLETED' if all_completed else 'FIRST_COMPLETED'
+        xx = concurrent.futures.wait(self._scheduled, return_when=return_when, timeout=timeout)
+        for r in xx.done:
+            self._finalise(r)
+        self._scheduled = xx.not_done
+
     def read(self, measurements=None,
              src_roi=None,
              chunk_scale=None):
-        from utils import select_all
+        #pylint: disable=too-many-locals
+        from utils import select_all, block_iterator, dst_from_src
 
         measurements, src_shape = self._check_measurements(measurements)
 
         if src_roi is None:
             src_roi = select_all(src_shape)
 
-        slot_alloc, read_chunk = self._init_alloc(measurements, chunk_scale)
+        dst_shape = shape_from_slice(src_roi, src_shape)
+        dst_roi = dst_from_src(src_roi, src_shape)
 
-        return slot_alloc, read_chunk
+        out = {m.name: np.ndarray(dst_shape, dtype=m.dtype)
+               for m in measurements}
+
+        read_to_shared = RoundRobinSelector([f.read_to_shared for f in self._ff])
+        slot_alloc, read_chunk = self._init_alloc(measurements, chunk_scale)
+        self._scheduled = set()
+
+        def get_slot(shape, dtype):
+            (slot, my_view) = slot_alloc(shape, dtype)
+
+            while slot is None:
+                self._process_results()
+                (slot, my_view) = slot_alloc(shape, dtype)
+
+            return (slot, my_view)
+
+        for roi in block_iterator(read_chunk, src_roi, src_shape):
+            block_shape = shape_from_slice(roi)
+            for m in measurements:
+                dst = out[m.name]
+                slot, my_view = get_slot(block_shape, m.dtype)
+                future = read_to_shared(m.name, roi, slot.offset)
+                self._pack_user_data(future, slot, dst_roi(roi), my_view, dst)
+                self._scheduled.add(future)
+
+            n_total, n_min = read_to_shared.current_load()
+
+            if n_min > 3:
+                self._process_results(timeout=0.05)
+
+        self._process_results(all_completed=True)
+        return out
 
     def close(self):
         for f in self._ff:
