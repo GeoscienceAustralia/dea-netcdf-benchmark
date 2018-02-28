@@ -93,7 +93,7 @@ def read_via_external(fname,
     if dump_info:
         print(yaml.dump(f.info))
 
-    ii = f.info.vars[measurement]
+    ii = f.info.bands[measurement]
     src_shape = ii.shape
 
     if src_roi is None:
@@ -190,7 +190,7 @@ def read_via_external_mp(fname,
     if dump_info:
         print(yaml.dump(info))
 
-    ii = info.vars[measurement]
+    ii = info.bands[measurement]
     src_shape = ii.shape
 
     if src_roi is None:

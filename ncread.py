@@ -15,22 +15,22 @@ from utils import (NamedObjectCache,
 warnings.filterwarnings('ignore', module="h5py")
 _LOG = logging.getLogger(__name__)
 
-NetcdfFileInfo = namedtuple('NetcdfFileInfo', ['vars', 'dims', 'grids'])
+NetcdfFileInfo = namedtuple('NetcdfFileInfo', ['bands', 'dims', 'grids'])
 DimensionInfo = namedtuple('DimensionInfo', ['name', 'shape', 'dtype'])
-VariableInfo = namedtuple('VariableInfo', ['name', 'shape', 'dtype', 'dims', 'chunks', 'grid_mapping', 'nodata'])
+BandInfo = namedtuple('BandInfo', ['name', 'shape', 'dtype', 'dims', 'chunks', 'grid_mapping', 'nodata'])
 
 
 def _parse_info(info_dict):
     """ Converts dictionaries into named tuples
     """
-    def mk_var_info(name, shape=None, dtype=None, dims=None, chunks=None, grid_mapping=None, nodata=None):
-        return VariableInfo(**locals())
+    def mk_band_info(name, shape=None, dtype=None, dims=None, chunks=None, grid_mapping=None, nodata=None):
+        return BandInfo(**locals())
 
-    vars = {k: mk_var_info(k, **v) for k, v in info_dict['vars'].items()}
+    bands = {k: mk_band_info(k, **v) for k, v in info_dict['bands'].items()}
     dims = {k: DimensionInfo(name=k, **v) for k, v in info_dict['dims'].items()}
     grids = info_dict.get('grids')
 
-    return NetcdfFileInfo(vars=vars, dims=dims, grids=grids)
+    return NetcdfFileInfo(bands=bands, dims=dims, grids=grids)
 
 
 def h5_utf8_attr(f, name):
@@ -117,7 +117,7 @@ class ExternalNetcdfReader(object):
 
     def info(self):
         def is_nc_dim(ds):
-            return b'DIMENSION_SCALE' == ds.attrs.get('CLASS')
+            return ds.attrs.get('CLASS') == b'DIMENSION_SCALE'
 
         def is_nc_grid(ds):
             return 'grid_mapping_name' in ds.attrs
@@ -128,7 +128,7 @@ class ExternalNetcdfReader(object):
         def nc_dims(ds):
             return tuple(ds.file[ref[0]].name.split('/')[-1] for ref in ds.attrs['DIMENSION_LIST'])
 
-        def describe_var(ds):
+        def describe_band(ds):
             props = dict(shape=ds.shape,
                          chunks=ds.chunks,
                          dtype=ds.dtype.name,
@@ -150,9 +150,9 @@ class ExternalNetcdfReader(object):
         def describe_grid(ds):
             return h5_extract_attrs(ds, unwrap_arrays=True)
 
-        vars = {k: describe_var(self._f[k])
-                for k in self._f.keys()
-                if is_nc_var(self._f[k])}
+        bands = {k: describe_band(self._f[k])
+                 for k in self._f.keys()
+                 if is_nc_var(self._f[k])}
 
         dims = {k: describe_dim(self._f[k])
                 for k in self._f.keys()
@@ -162,7 +162,7 @@ class ExternalNetcdfReader(object):
                  for k in self._f.keys()
                  if is_nc_grid(self._f[k])}
 
-        return dict(vars=vars,
+        return dict(bands=bands,
                     dims=dims,
                     grids=grids)
 
@@ -198,7 +198,7 @@ class SharedState(object):
             # ensure that processes are launched and global state can be released in the main process
             ff = concurrent.futures.wait([p.submit(SharedState._check_buf) for p in pp])
             results = list(r.result() for r in ff.done)
-            SharedBufferView._shared_view = None
+            SharedState._shared_view = None
 
         if set(results) != set([True]):
             raise RuntimeError('Failed to share work buffer with worker processes')
@@ -279,14 +279,14 @@ class NetcdfProcProxy(object):
         fd = fd.result()
 
         if fd < 0:
-            raise IOError('Failed to open file: "%s"', fname)
+            raise IOError('Failed to open file: "%s"' % fname)
 
         if info is None:
             info = proc.submit(eh5_info, fd)
             info = info.result()
 
             if info is None:
-                raise IOError('Failed to query info about the file: "%s"', fname)
+                raise IOError('Failed to query info about the file: "%s"' % fname)
 
             info = _parse_info(info)
 
@@ -331,7 +331,7 @@ class _MultiProcNetcdfReader(object):
         self._info = info
 
     def _check_measurements(self, measurements):
-        bands = self._info.vars
+        bands = self._info.bands
 
         if isinstance(measurements, str):
             measurements = [measurements]
@@ -344,6 +344,9 @@ class _MultiProcNetcdfReader(object):
                     raise ValueError('No such measurement: ' + m)
 
         measurements = [bands[m] for m in measurements]
+
+        # TODO: for now just checking shapes, but should check dimension names
+        # and grid_mapping
         shapes = set(map(lambda m: m.shape, measurements))
         if len(shapes) != 1:
             raise ValueError('Expect all requested bands to have the same shape')
@@ -393,7 +396,6 @@ class MultiProcNetcdfReader(object):
     def __init__(self, num_workers, mb=None):
         self._state = SharedState(mb=mb)
         self._procs = self._state.make_procs(num_workers)
-        pass
 
     def open(self, fname):
         return _MultiProcNetcdfReader(fname, self._procs, self._state)
@@ -406,12 +408,9 @@ def test_multi():
 
     f = mpr.open(fname)
 
-    print(f._ff)
     f.close()
 
     with mpr.open(fname) as f:
-        print(f._info)
-
         xx = f.read()
         print(xx)
         assert xx is not None
