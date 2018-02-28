@@ -11,6 +11,7 @@ from utils import (NamedObjectCache,
 
 from ncread import (NetcdfProcProxy,
                     ExternalNetcdfReader,
+                    RoundRobinSelector,
                     SharedState)
 
 TEST_HDF_FILE = ('/g/data2/rs0/datacube/002/LS8_OLI_NBAR/4_-35/'
@@ -211,16 +212,7 @@ def read_via_external_mp(fname,
 
     dst = np.zeros(dst_shape, dtype=ii.dtype)
 
-    f_idx = -1
-
-    def choose_target():
-        '''For now just round-robin between ff'''
-        nonlocal f_idx
-
-        f_idx = f_idx + 1
-        if f_idx >= len(ff):
-            f_idx = 0
-        return ff[f_idx]
+    read_to_shared = RoundRobinSelector([f.read_to_shared for f in ff])
 
     def finalise(r):
         slot, roi, my_view = r._userdata
@@ -245,8 +237,7 @@ def read_via_external_mp(fname,
 
     for roi in block_iterator(read_chunk, src_roi, src_shape):
         (slot, my_view) = get_slot(shape_from_slice(roi))
-        f = choose_target()
-        future = f.read_to_shared(measurement, roi, slot.offset)
+        future = read_to_shared(measurement, roi, slot.offset)
         future._userdata = (slot, roi, my_view)
         scheduled.add(future)
 

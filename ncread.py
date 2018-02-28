@@ -5,6 +5,7 @@ from multiprocessing.sharedctypes import RawArray
 import concurrent.futures
 import threading
 from collections import namedtuple
+from types import SimpleNamespace
 
 from utils import (NamedObjectCache,
                    shape_from_slice,
@@ -307,6 +308,26 @@ class NetcdfProcProxy(object):
 
     def read_to_shared(self, varname, roi, offset):
         return self._proc.submit(eh5_read_to_shared, self._fd, varname, roi, offset)
+
+
+class RoundRobinSelector(object):
+    def __init__(self, procs):
+        self._procs = [SimpleNamespace(proc=proc, n=0) for proc in procs]
+
+    def _pick(self):
+        return min(*self._procs, key=lambda p: p.n)
+
+    def _done_callback(self, proc):
+        def on_done(_):
+            proc.n -= 1
+        return on_done
+
+    def __call__(self, *args, **kwargs):
+        proc = self._pick()
+        future = proc.proc(*args, **kwargs)
+        proc.n += 1
+        future.add_done_callback(self._done_callback(proc))
+        return future
 
 
 class _MultiProcNetcdfReader(object):
