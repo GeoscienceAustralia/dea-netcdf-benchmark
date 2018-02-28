@@ -222,15 +222,19 @@ def read_via_external_mp(fname,
             print('Failed one of the reads:', roi, slot.id)
         slot.release()
 
-    def get_slot(shape):
+    def process_results(timeout=None, all=False):
         nonlocal scheduled
+        return_when = 'ALL_COMPLETED' if all else 'FIRST_COMPLETED'
+        xx = concurrent.futures.wait(scheduled, return_when=return_when, timeout=timeout)
+        for r in xx.done:
+            finalise(r)
+        scheduled = xx.not_done
+
+    def get_slot(shape):
         (slot, my_view) = slot_alloc(shape)
 
         while slot is None:
-            xx = concurrent.futures.wait(scheduled, return_when='FIRST_COMPLETED')
-            for r in xx.done:
-                finalise(r)
-            scheduled = xx.not_done
+            process_results()
             (slot, my_view) = slot_alloc(shape)
 
         return (slot, my_view)
@@ -241,9 +245,11 @@ def read_via_external_mp(fname,
         future._userdata = (slot, roi, my_view)
         scheduled.add(future)
 
-    xx = concurrent.futures.wait(scheduled)
-    for r in xx.done:
-        finalise(r)
+        n_total, n_min = read_to_shared.current_load()
+        if n_min > 3:
+            process_results(timeout=0.05)
+
+    process_results(all=True)
 
     for f in ff:
         f.close()

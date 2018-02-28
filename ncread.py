@@ -322,6 +322,15 @@ class RoundRobinSelector(object):
             proc.n -= 1
         return on_done
 
+    def current_load(self):
+        """ Takes snapshot of the current state (it's changing all the time)
+        Returns a tuple of
+        - Total tasks in flight
+        - Number of tasks for the least busy proc
+        """
+        nn = [p.n for p in self._procs]
+        return sum(nn), min(nn)
+
     def __call__(self, *args, **kwargs):
         proc = self._pick()
         future = proc.proc(*args, **kwargs)
