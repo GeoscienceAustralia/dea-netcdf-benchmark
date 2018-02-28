@@ -16,18 +16,18 @@ warnings.filterwarnings('ignore', module="h5py")
 _LOG = logging.getLogger(__name__)
 
 NetcdfFileInfo = namedtuple('NetcdfFileInfo', ['vars', 'dims', 'grids'])
-DimensionInfo = namedtuple('DimensionInfo', ['shape', 'dtype'])
-VariableInfo = namedtuple('VariableInfo', ['shape', 'dtype', 'dims', 'chunks', 'grid_mapping', 'nodata'])
+DimensionInfo = namedtuple('DimensionInfo', ['name', 'shape', 'dtype'])
+VariableInfo = namedtuple('VariableInfo', ['name', 'shape', 'dtype', 'dims', 'chunks', 'grid_mapping', 'nodata'])
 
 
 def _parse_info(info_dict):
     """ Converts dictionaries into named tuples
     """
-    def mk_var_info(shape=None, dtype=None, dims=None, chunks=None, grid_mapping=None, nodata=None):
+    def mk_var_info(name, shape=None, dtype=None, dims=None, chunks=None, grid_mapping=None, nodata=None):
         return VariableInfo(**locals())
 
-    vars = {k: mk_var_info(**v) for k, v in info_dict['vars'].items()}
-    dims = {k: DimensionInfo(**v) for k, v in info_dict['dims'].items()}
+    vars = {k: mk_var_info(k, **v) for k, v in info_dict['vars'].items()}
+    dims = {k: DimensionInfo(name=k, **v) for k, v in info_dict['dims'].items()}
     grids = info_dict.get('grids')
 
     return NetcdfFileInfo(vars=vars, dims=dims, grids=grids)
@@ -343,26 +343,24 @@ class _MultiProcNetcdfReader(object):
                 if m not in bands:
                     raise ValueError('No such measurement: ' + m)
 
-        shapes = set(map(lambda m: bands[m].shape, measurements))
+        measurements = [bands[m] for m in measurements]
+        shapes = set(map(lambda m: m.shape, measurements))
         if len(shapes) != 1:
             raise ValueError('Expect all requested bands to have the same shape')
 
         return measurements, shapes.pop()
 
     def _init_alloc(self, measurements, chunk_scale):
-        bands = self._info.vars
-
-        dtypes = map(lambda m: np.dtype(bands[m].dtype), measurements)
+        dtypes = map(lambda m: np.dtype(m.dtype), measurements)
         dtypes = sorted(dtypes, key=lambda dtype: dtype.itemsize, reverse=True)
         largest_dtype = dtypes[0]
 
-        read_chunk = bands[measurements[0]].chunks
+        read_chunk = measurements[0].chunks
         if chunk_scale is not None:
             read_chunk = tuple(ch*s for ch, s in
                                zip(read_chunk, chunk_scale))
 
         slot_alloc, _ = self._state.slot_allocator(read_chunk, largest_dtype)
-
         return slot_alloc, read_chunk
 
     def read(self, measurements=None,
