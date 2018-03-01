@@ -345,6 +345,8 @@ class RoundRobinSelector(object):
 
 class MultiProcNetcdfReader(object):
     def __init__(self, fname, procs, state):
+        """ Don't use directly, see `ReaderFactory.open`
+        """
         self._fname = fname
         self._procs = procs
         self._state = state
@@ -434,9 +436,21 @@ class MultiProcNetcdfReader(object):
             self._finalise(r)
         self._scheduled = xx.not_done
 
-    def read(self, measurements=None,
+    def read(self,
+             measurements=None,
              src_roi=None,
              chunk_scale=None):
+        """Read data from a file in parallel
+
+        :param [str] measurements: A list of measurements to read
+
+        :param src_roi: Region of interest to read (e.g. `numpy.s_[:5,:,:]`)
+
+        :param chunk_scale: A tuple of integers, a scaling factors for each
+        dimension of measurements being read (e.g. (1,2,2) will read 4 block at
+        a time in 2x2 spatial arrangement)
+
+        """
         #pylint: disable=too-many-locals
 
         measurements, src_shape = self._check_measurements(measurements)
@@ -481,6 +495,8 @@ class MultiProcNetcdfReader(object):
         return out
 
     def close(self):
+        """ Close the file.
+        """
         for f in self._ff:
             f.close()
 
@@ -492,14 +508,51 @@ class MultiProcNetcdfReader(object):
 
 
 class ReaderFactory(object):
+    """This class maintains a pool of worker processes and shared to memory to
+    communicate with them. There is a non-trivial costs in launching a new
+    process, so it's best to re-use the same processing pool when working with
+    many files one at a time.
+
+    One can configure number of workers and the size of shared memory in
+    megabytes. How much shared memory one needs depends on a number of factors:
+
+    - Number of workers, more workers more memory is needed to keep work load steady
+    - Size of read tasks in bytes
+
+    Reading is performed in multiples of storage chunks aligned to the storage
+    chunking regime.
+
+    """
 
     def __init__(self, num_workers, mb=None):
+        """Create a new instance. One can create several. It is safe to use different
+        `ReaderFactory` instances from different threads concurrently.
+
+        :param int num_workers: Number of worker threads to use
+
+        :param int|None mb: Amount of memory in megabytes to reserve for
+        communications with worker processes.
+
+        """
         self._state = SharedState(mb=mb)
         self._procs = self._state.make_procs(num_workers)
 
     def open(self, fname):
+        """ Open file for reading.
+        :param str fname: path to a netcdf file
+        """
         return MultiProcNetcdfReader(fname, self._procs, self._state)
 
 
 def nc_open(fname, num_workers, mb=None):
+    """Convenience method that creates new non-reusable worker pool and opens the
+    file for parallel reading. If you need to process many files consider using
+    `ReaderFactory` to amortize the cost of launching processing workers.
+
+        :param str fname: path to a netcdf file
+        :param int num_workers: Number of worker threads to use
+        :param int|None mb: Amount of memory in megabytes to reserve for
+        communications with worker processes.
+
+    """
     return ReaderFactory(num_workers, mb=mb).open(fname)
