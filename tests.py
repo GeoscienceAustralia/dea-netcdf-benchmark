@@ -2,17 +2,20 @@ from pathlib import Path
 import numpy as np
 import yaml
 
-from utils import (NamedObjectCache,
-                   Timer,
-                   block_iterator,
-                   dst_from_src,
-                   select_all,
-                   shape_from_slice)
+from mpnetcdf4.utils import (NamedObjectCache,
+                             Timer,
+                             block_iterator,
+                             dst_from_src,
+                             select_all,
+                             shape_from_slice)
 
-from ncread import (NetcdfProcProxy,
-                    ExternalNetcdfReader,
-                    RoundRobinSelector,
-                    SharedState)
+from mpnetcdf4.ncread import (NetcdfProcProxy,
+                              ReaderFactory,
+                              eh5_open,
+                              eh5_close,
+                              ExternalNetcdfReader,
+                              RoundRobinSelector,
+                              SharedState)
 
 TEST_HDF_FILE = ('/g/data2/rs0/datacube/002/LS8_OLI_NBAR/4_-35/'
                  'LS8_OLI_NBAR_3577_4_-35_20171107004524000000_v1513646960.nc')
@@ -29,7 +32,6 @@ if not Path(TEST_HDF_STACKED_FILE).exists():
 
 
 def test_1():
-    from ncread import eh5_open, eh5_close
     st = SharedState(mb=1)
 
     fname = TEST_HDF_FILE
@@ -281,6 +283,20 @@ def test_read_via_external_mp(nprocs=2,
             print(dd.shape, dd.dtype)
             out[band] = dd
     return out
+
+
+def test_reader_factory():
+    fname = "sample.nc"
+
+    mpr = ReaderFactory(2)
+    f = mpr.open(fname)
+    assert f is not None
+    f.close()
+
+    with mpr.open(fname) as f:
+        xx = f.read()
+        print(xx)
+        assert xx is not None
 
 
 if __name__ == '__main__':

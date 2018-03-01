@@ -7,11 +7,14 @@ import threading
 from collections import namedtuple
 from types import SimpleNamespace
 
-from utils import (NamedObjectCache,
-                   shape_from_slice,
-                   array_memsize,
-                   SharedBufferView,
-                   ChunkStoreAlloc)
+from .utils import (NamedObjectCache,
+                    shape_from_slice,
+                    array_memsize,
+                    SharedBufferView,
+                    ChunkStoreAlloc,
+                    select_all,
+                    block_iterator,
+                    dst_from_src)
 
 warnings.filterwarnings('ignore', module="h5py")
 _LOG = logging.getLogger(__name__)
@@ -340,7 +343,7 @@ class RoundRobinSelector(object):
         return future
 
 
-class _MultiProcNetcdfReader(object):
+class MultiProcNetcdfReader(object):
     def __init__(self, fname, procs, state):
         self._fname = fname
         self._procs = procs
@@ -435,7 +438,6 @@ class _MultiProcNetcdfReader(object):
              src_roi=None,
              chunk_scale=None):
         #pylint: disable=too-many-locals
-        from utils import select_all, block_iterator, dst_from_src
 
         measurements, src_shape = self._check_measurements(measurements)
 
@@ -489,26 +491,15 @@ class _MultiProcNetcdfReader(object):
         self.close()
 
 
-class MultiProcNetcdfReader(object):
+class ReaderFactory(object):
 
     def __init__(self, num_workers, mb=None):
         self._state = SharedState(mb=mb)
         self._procs = self._state.make_procs(num_workers)
 
     def open(self, fname):
-        return _MultiProcNetcdfReader(fname, self._procs, self._state)
+        return MultiProcNetcdfReader(fname, self._procs, self._state)
 
 
-def test_multi():
-    fname = "sample.nc"
-
-    mpr = MultiProcNetcdfReader(2)
-
-    f = mpr.open(fname)
-
-    f.close()
-
-    with mpr.open(fname) as f:
-        xx = f.read()
-        print(xx)
-        assert xx is not None
+def nc_open(fname, num_workers, mb=None):
+    return ReaderFactory(num_workers, mb=mb).open(fname)

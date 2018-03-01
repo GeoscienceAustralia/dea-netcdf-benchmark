@@ -2,7 +2,7 @@ import numpy as np
 import h5py
 import rasterio
 
-from utils import (
+from .utils import (
     block_iterator,
     shape_from_slice,
     select_all,
