@@ -1,14 +1,52 @@
+from types import SimpleNamespace
 import numpy as np
 import h5py
 import rasterio
 
 from .utils import (
+    Timer,
     block_iterator,
     shape_from_slice,
     select_all,
     norm_selection,
     dst_from_src,
 )
+
+
+def size_in_bytes(o):
+    if isinstance(o, np.ndarray):
+        return o.size*o.dtype.itemsize
+    if isinstance(o, dict):
+        return size_in_bytes(o.values())
+    return sum(size_in_bytes(x) for x in o)
+
+
+def with_stats(f, message=None):
+    MB = (1 << 20)
+    GB = (1 << 30)
+
+    def run(*args, **kwargs):
+        with Timer() as t:
+            out = f(*args, **kwargs)
+
+        nbytes = size_in_bytes(out)
+        stats = SimpleNamespace(elapsed=t.elapsed,
+                                ms=t.elapsed*1000,
+                                nbytes=nbytes,
+                                mb=(nbytes/MB),
+                                gb=(nbytes/GB),
+                                throughput=nbytes/t.elapsed,
+                                throughput_mb=(nbytes/t.elapsed)/MB)
+
+        if message is not None:
+            print('%s: read %.3fMb in %.5f secs, %.5f Mb/s' % (
+                message,
+                stats.mb,
+                stats.elapsed,
+                stats.throughput_mb))
+        return out, stats
+
+    return run
 
 
 def local_read(fname, varname, src_roi=None, buffer=None, offset=0):
