@@ -319,6 +319,9 @@ class RoundRobinSelector(object):
         self._procs = [SimpleNamespace(proc=proc, n=0) for proc in procs]
 
     def _pick(self):
+        if len(self._procs) == 1:
+            return self._procs[0]
+
         return min(*self._procs, key=lambda p: p.n)
 
     def _done_callback(self, proc):
