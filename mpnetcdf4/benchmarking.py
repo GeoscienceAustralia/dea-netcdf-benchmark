@@ -106,3 +106,44 @@ def local_read_rio(fname, varname, src_roi=None):
         window = tuple(map(slice_to_window, src_roi[1:3]))
 
         return f.read(indexes=t, window=window)
+
+
+def plot_benchmark_results(stats, fig,
+                           max_throughput=None,
+                           max_time=None):
+    st = np.r_[[(s.params.nprocs, s.t_total, s.elapsed, s.mb) for s in stats]]
+
+    nprocs, t_total, t_read, mb = st.T
+    base_throughput = mb[0]/t_total[0]
+
+    x_ax_max = nprocs.max() + 0.5
+
+    def set_0_based(ax, max_val=None):
+        if max_val is None:
+            max_val = ax.axis()[-1]
+        ax.axis([0.5, x_ax_max, 0, max_val])
+
+    axs = fig.subplots(1, 3)
+
+    ax = axs[0]
+    ax.plot(nprocs, mb/t_total, '.-')
+
+    ax.set_title('Throughput')
+    ax.yaxis.set_label_text('Mb/s')
+    ax.xaxis.set_label_text('# Worker Threads')
+    set_0_based(ax, max_throughput)
+
+    ax = axs[1]
+    ax.set_title('Time to Read')
+    ax.plot(nprocs, t_total, '.-')
+    ax.yaxis.set_label_text('secs')
+    ax.xaxis.set_label_text('# Worker Threads')
+    set_0_based(ax, max_time)
+    #ax.axis([0.5, x_ax_max, 0, 175])
+
+    ax = axs[2]
+    ax.set_title('Efficiency per worker')
+    ax.plot(nprocs, 100*(mb/t_total)/nprocs/base_throughput, '.-')
+    ax.yaxis.set_label_text('%')
+    ax.xaxis.set_label_text('# Worker Threads')
+    set_0_based(ax, 110)
