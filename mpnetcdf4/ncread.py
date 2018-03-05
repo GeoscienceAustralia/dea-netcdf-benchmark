@@ -276,15 +276,15 @@ def eh5_close(fd):
 
 
 class NetcdfProcProxy(object):
-    def __init__(self, fname, proc, info=None):
+    def __init__(self, fname, proc, info=None, fd=None):
         self._fd = -1
         self._proc = proc
 
-        fd = proc.submit(eh5_open, fname)
-        fd = fd.result()
-
-        if fd < 0:
-            raise IOError('Failed to open file: "%s"' % fname)
+        if fd is None:
+            fd = proc.submit(eh5_open, fname)
+            fd = fd.result()
+            if fd < 0:
+                raise IOError('Failed to open file: "%s"' % fname)
 
         if info is None:
             info = proc.submit(eh5_info, fd)
@@ -298,6 +298,18 @@ class NetcdfProcProxy(object):
         self._proc = proc
         self._fd = fd
         self._info = info
+
+    @staticmethod
+    def parallel_open(fname, procs):
+        fds_futures = [proc.submit(eh5_open, fname) for proc in procs]
+        concurrent.futures.wait(fds_futures)
+        fds = [f.result() for f in fds_futures]
+
+        # Create first one separately to get info structure
+        f = NetcdfProcProxy(fname, procs[0], fd=fds[0])
+
+        return [f] + [NetcdfProcProxy(fname, proc, info=f.info, fd=fd)
+                      for proc, fd in zip(procs[1:], fds[1:])]
 
     @property
     def proc(self):
@@ -359,16 +371,8 @@ class MultiProcNetcdfReader(object):
         self._prepare()
 
     def _prepare(self):
-        ff = []
-        info = None
-        for i, proc in enumerate(self._procs):
-            f = NetcdfProcProxy(self._fname, proc=proc, info=info)
-            ff.append(f)
-            if i == 0:
-                info = f.info
-
-        self._ff = ff
-        self._info = info
+        self._ff = NetcdfProcProxy.parallel_open(self._fname, self._procs)
+        self._info = self._ff[0].info
 
     def _check_measurements(self, measurements):
         bands = self._info.bands
@@ -454,7 +458,7 @@ class MultiProcNetcdfReader(object):
         a time in 2x2 spatial arrangement)
 
         """
-        #pylint: disable=too-many-locals
+        # pylint: disable=too-many-locals
 
         measurements, src_shape = self._check_measurements(measurements)
 
