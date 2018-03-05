@@ -117,8 +117,12 @@ def test_reader_factory():
     f.close()
 
     with mpr.open(fname) as f:
+        dims = f.read_dims('red')
+        assert len(dims) == 3
+        print(list(dims))
+
         xx = f.read()
-        print(xx)
+        print(list(xx))
         assert xx is not None
 
 

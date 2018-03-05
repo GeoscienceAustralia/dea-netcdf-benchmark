@@ -4,7 +4,7 @@ import logging
 from multiprocessing.sharedctypes import RawArray
 import concurrent.futures
 import threading
-from collections import namedtuple
+from collections import namedtuple, OrderedDict
 from types import SimpleNamespace
 
 from .utils import (NamedObjectCache,
@@ -370,6 +370,10 @@ class MultiProcNetcdfReader(object):
         self._scheduled = None
         self._prepare()
 
+    @property
+    def info(self):
+        return self._info
+
     def _prepare(self):
         self._ff = NetcdfProcProxy.parallel_open(self._fname, self._procs)
         self._info = self._ff[0].info
@@ -442,6 +446,26 @@ class MultiProcNetcdfReader(object):
         for r in xx.done:
             self._finalise(r)
         self._scheduled = xx.not_done
+
+    def read_dims(self, measurement, src_roi=None):
+        assert measurement in self._info.bands, "No such measurement"
+        dims = [self._info.dims[d] for d in self._info.bands[measurement].dims]
+        f = self._ff[0]
+
+        out = OrderedDict()
+        offset = 0
+
+        for i, dim in enumerate(dims):
+            roi = slice(None, None) if src_roi is None else src_roi[i]
+            dim_shape = shape_from_slice(roi, dim.shape)
+            my_view = self._state.view.asarray(offset, dim_shape, dim.dtype)
+
+            if f.read_to_shared(dim.name, roi, offset=offset).result():
+                out[dim.name] = my_view.copy()
+            else:
+                raise IOError('Failed to read dimension: %s' % dim.name)
+
+        return out
 
     def read(self,
              measurements=None,
