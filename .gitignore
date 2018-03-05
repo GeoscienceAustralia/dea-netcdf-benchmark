@@ -70,3 +70,8 @@ docs/dev/generate/
 
 #Local Visual Studio Code configurations
 .vscode/
+/notebooks/sample.nc
+/notebooks/sample_stacked.nc
+/sample.nc
+/sample_stacked.nc
+/notebooks/*.pickle

@@ -1,20 +1,14 @@
 from pathlib import Path
 import numpy as np
-import yaml
 
 from mpnetcdf4.utils import (NamedObjectCache,
-                             Timer,
-                             block_iterator,
-                             dst_from_src,
-                             select_all,
-                             shape_from_slice)
+                             Timer)
 
 from mpnetcdf4.ncread import (NetcdfProcProxy,
                               ReaderFactory,
                               eh5_open,
                               eh5_close,
                               ExternalNetcdfReader,
-                              RoundRobinSelector,
                               SharedState)
 
 TEST_HDF_FILE = ('/g/data2/rs0/datacube/002/LS8_OLI_NBAR/4_-35/'
@@ -76,217 +70,46 @@ def test_named_cache():
     print('Should be missing:', obj)
 
 
-def read_via_external(fname,
-                      measurement,
-                      dump_info=False,
-                      src_roi=None,
-                      state=None,
-                      proc=None,
-                      chunk_scale=None):
-    import concurrent.futures
+def test_netdcf_proxy():
+    fname = TEST_HDF_FILE
 
-    if state is None:
-        state = SharedState()
+    for i in range(3):
+        with Timer('Setup'):
+            st = SharedState(mb=1)
+            proc = st.make_procs(1)[0]
 
-    if proc is None:
-        proc = state.make_procs(1)[0]
-
-    f = NetcdfProcProxy(fname, proc=proc)
-
-    if dump_info:
-        print(yaml.dump(f.info))
-
-    ii = f.info.bands[measurement]
-    src_shape = ii.shape
-
-    if src_roi is None:
-        src_roi = select_all(src_shape)
-
-    if chunk_scale is None:
-        read_chunk = ii.chunks
-    else:
-        read_chunk = tuple(ch*s for ch, s in zip(ii.chunks, chunk_scale))
-
-    slot_alloc, _ = state.slot_allocator(read_chunk, ii.dtype)
-    assert slot_alloc is not None
-
-    scheduled = set()
-
-    dst_shape = shape_from_slice(src_roi, src_shape)
-    dst_roi = dst_from_src(src_roi, src_shape)
-
-    dst = np.zeros(dst_shape, dtype=ii.dtype)
-
-    def finalise(r):
-        slot, roi, my_view = r._userdata
-        if r.result():
-            dst[dst_roi(roi)] = my_view
-        slot.release()
-
-    for roi in block_iterator(read_chunk, src_roi, src_shape):
-        (slot, my_view) = slot_alloc(shape_from_slice(roi))
-
-        while slot is None:
-            xx = concurrent.futures.wait(scheduled, return_when='FIRST_COMPLETED')
-            for r in xx.done:
-                finalise(r)
-            scheduled = xx.not_done
-            (slot, my_view) = slot_alloc(shape_from_slice(roi))
-
-        future = f.read_to_shared(measurement, roi, slot.offset)
-        future._userdata = (slot, roi, my_view)
-
-        scheduled.add(future)
-
-    xx = concurrent.futures.wait(scheduled)
-    for r in xx.done:
-        finalise(r)
-
-    f.close()
-    return dst, state, f.proc
-
-
-def test_read_via_external():
-    print('\nStarting read test')
-
-    with Timer(message='Prepare'):
-        state = SharedState()
-        proc = state.make_procs(1)[0]
-
-    for i, band in enumerate('red green blue nir'.split(' ')):
-        with Timer(message='Read::%s 2x2 (%d)' % (band, i)):
-            dd, state, proc = read_via_external(TEST_HDF_FILE, band,
-                                                chunk_scale=(1, 2, 2),
-                                                state=state, proc=proc)
-
-            assert dd.shape == (1, 4000, 4000)
-            print(dd.shape, dd.dtype)
-
-
-def read_via_external_mp(fname,
-                         measurement,
-                         src_roi=None,
-                         dump_info=False,
-                         state=None,
-                         procs=None,
-                         chunk_scale=None):
-    import concurrent.futures
-
-    if state is None:
-        state = SharedState()
-
-    if procs is None:
-        procs = 1
-
-    if isinstance(procs, int):
-        procs = state.make_procs(procs)
-
-    ff = []
-    info = None
-    for i, proc in enumerate(procs):
-        f = NetcdfProcProxy(fname, proc=proc, info=info)
-        ff.append(f)
+    for i in range(5):
+        with Timer(message='Open'):
+            f = NetcdfProcProxy(fname, proc)
 
         if i == 0:
-            info = f.info
+            print(list(f.info.bands))
 
-    if dump_info:
-        print(yaml.dump(info))
-
-    ii = info.bands[measurement]
-    src_shape = ii.shape
-
-    if src_roi is None:
-        src_roi = select_all(src_shape)
-
-    if chunk_scale is None:
-        read_chunk = ii.chunks
-    else:
-        read_chunk = tuple(ch*s for ch, s in zip(ii.chunks, chunk_scale))
-
-    slot_alloc, _ = state.slot_allocator(read_chunk, ii.dtype)
-    assert slot_alloc is not None
-
-    scheduled = set()
-
-    dst_shape = shape_from_slice(src_roi, src_shape)
-    dst_roi = dst_from_src(src_roi, src_shape)
-
-    dst = np.zeros(dst_shape, dtype=ii.dtype)
-
-    read_to_shared = RoundRobinSelector([f.read_to_shared for f in ff])
-
-    def finalise(r):
-        slot, roi, my_view = r._userdata
-        if r.result():
-            dst[dst_roi(roi)] = my_view
-        else:
-            print('Failed one of the reads:', roi, slot.id)
-        slot.release()
-
-    def process_results(timeout=None, all=False):
-        nonlocal scheduled
-        return_when = 'ALL_COMPLETED' if all else 'FIRST_COMPLETED'
-        xx = concurrent.futures.wait(scheduled, return_when=return_when, timeout=timeout)
-        for r in xx.done:
-            finalise(r)
-        scheduled = xx.not_done
-
-    def get_slot(shape):
-        (slot, my_view) = slot_alloc(shape)
-
-        while slot is None:
-            process_results()
-            (slot, my_view) = slot_alloc(shape)
-
-        return (slot, my_view)
-
-    for roi in block_iterator(read_chunk, src_roi, src_shape):
-        (slot, my_view) = get_slot(shape_from_slice(roi))
-        future = read_to_shared(measurement, roi, slot.offset)
-        future._userdata = (slot, roi, my_view)
-        scheduled.add(future)
-
-        n_total, n_min = read_to_shared.current_load()
-        if n_min > 3:
-            process_results(timeout=0.05)
-
-    process_results(all=True)
-
-    for f in ff:
+        future = f.read_to_shared('red', np.s_[0, :200, :200], 0)
+        assert future.result() is True
         f.close()
 
-    return dst, state, procs
 
+def test_parallel_open():
+    fname = TEST_HDF_FILE
+    nprocs = 8
 
-def test_read_via_external_mp(nprocs=2,
-                              fname=TEST_HDF_FILE,
-                              measurements='red green blue nir'.split(' '),
-                              chunk_scale=(1, 2, 2),
-                              src_roi=None):
-    print('\nStarting concurrent read test: %d\n %s' % (nprocs, fname))
+    with Timer(message='Prepare'):
+        st = SharedState()
+        pp = st.make_procs(nprocs)
 
-    state = None
-    procs = nprocs
-    out = {}
+    for i in range(4):
+        with Timer(message='Open x%d' % nprocs):
+            ff = NetcdfProcProxy.parallel_open(fname, pp)
 
-    for i, band in enumerate(measurements):
-        with Timer(message='Read(x%s)::%s %dx%d (%d)' % (nprocs, band,
-                                                         chunk_scale[1],
-                                                         chunk_scale[2],
-                                                         i)):
-            dd, state, procs = read_via_external_mp(fname, band,
-                                                    src_roi=src_roi,
-                                                    chunk_scale=(1, 2, 2),
-                                                    state=state, procs=procs)
+        if i == 0:
+            print(list(ff[0].info.bands))
 
-            print(dd.shape, dd.dtype)
-            out[band] = dd
-    return out
+        del ff
 
 
 def test_reader_factory():
-    fname = "sample.nc"
+    fname = TEST_HDF_FILE
 
     mpr = ReaderFactory(2)
     f = mpr.open(fname)
@@ -300,7 +123,4 @@ def test_reader_factory():
 
 
 if __name__ == '__main__':
-    test_read_via_external()
-    test_read_via_external_mp(2)
-    test_read_via_external_mp(4)
-    test_read_via_external_mp(8)
+    pass
