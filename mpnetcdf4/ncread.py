@@ -362,17 +362,20 @@ class RoundRobinSelector(object):
 
 
 class MultiProcNetcdfReader(object):
+    @staticmethod
+    def _prepare(fname, procs):
+        ff = NetcdfProcProxy.parallel_open(fname, procs)
+        return ff, ff[0].info
+
     def __init__(self, fname, procs, state):
         """ Don't use directly, see `ReaderFactory.open`
         """
         self._fname = fname
-        self._procs = procs
         self._state = state
-        self._ff = []
-        self._info = None
+        (self._ff,
+         self._info) = self._prepare(fname, procs)
         self._scheduled = None
         self._coords = {}
-        self._prepare()
 
     @property
     def info(self):
@@ -404,10 +407,6 @@ class MultiProcNetcdfReader(object):
 
             if n not in self._coords:
                 self._coords[n] = read(self._info.dims[n])
-
-    def _prepare(self):
-        self._ff = NetcdfProcProxy.parallel_open(self._fname, self._procs)
-        self._info = self._ff[0].info
 
     def _check_measurements(self, measurements):
         bands = self._info.bands
