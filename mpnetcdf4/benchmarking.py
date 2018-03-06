@@ -53,40 +53,58 @@ def with_stats(f, message=None):
     return run
 
 
-def local_read(fname, varname, src_roi=None, buffer=None, offset=0):
-    with h5py.File(fname, 'r') as f:
-        ds = f[varname]
+def local_read(fname, bands, src_roi=None):
+
+    def read_band(ds, src_roi):
         src_shape = ds.shape
 
         if src_roi is None:
             src_roi = select_all(src_shape)
 
         dst_shape = shape_from_slice(src_roi, src_shape)
-        dd = np.ndarray(dst_shape, dtype=ds.dtype, buffer=buffer, offset=offset)
+        dd = np.ndarray(dst_shape, dtype=ds.dtype)
         ds.read_direct(dd, src_roi)
         return dd
 
+    if isinstance(bands, str):
+        bands = [bands]
 
-def local_block_read(fname, varname, src_roi=None, buffer=None, offset=0):
     with h5py.File(fname, 'r') as f:
-        ds = f[varname]
+        return {name: read_band(f[name], src_roi)
+                for name in bands}
+
+
+def local_block_read(fname, bands, src_roi=None, chunk_scale=None):
+    def read_band(ds, src_roi):
         src_shape = ds.shape
 
         if src_roi is None:
             src_roi = select_all(src_shape)
+
+        read_chunk = ds.chunks
+        if chunk_scale is not None:
+            read_chunk = tuple(ch*s for ch, s in
+                               zip(read_chunk, chunk_scale))
 
         dst_shape = shape_from_slice(src_roi, src_shape)
         dst_roi = dst_from_src(src_roi, src_shape)
 
-        dd = np.ndarray(dst_shape, dtype=ds.dtype, buffer=buffer, offset=offset)
+        dd = np.ndarray(dst_shape, dtype=ds.dtype)
 
-        for roi in block_iterator(ds.chunks, src_roi, src_shape):
+        for roi in block_iterator(read_chunk, src_roi, src_shape):
             ds.read_direct(dd, roi, dst_roi(roi))
 
         return dd
 
+    if isinstance(bands, str):
+        bands = [bands]
 
-def local_read_rio(fname, varname, src_roi=None):
+    with h5py.File(fname, 'r') as f:
+        return {name: read_band(f[name], src_roi)
+                for name in bands}
+
+
+def local_read_rio(fname, bands, src_roi=None):
     assert (src_roi is None) or (len(src_roi) == 3)
 
     def slice_to_window(sel):
@@ -97,19 +115,26 @@ def local_read_rio(fname, varname, src_roi=None):
         #  bands use 1 based indexing
         return tuple(range(sel.start+1, sel.stop+1, sel.step))
 
-    fname = 'NETCDF:' + fname + ':' + varname
+    def read_band(fname, varname, src_roi):
+        fname = 'NETCDF:' + fname + ':' + varname
 
-    with rasterio.open(fname, 'r') as f:
-        if src_roi is None:
-            return f.read()
+        with rasterio.open(fname, 'r') as f:
+            if src_roi is None:
+                return f.read()
 
-        src_shape = (f.count, ) + f.shape
-        src_roi = norm_selection(src_roi, src_shape)
+            src_shape = (f.count, ) + f.shape
+            src_roi = norm_selection(src_roi, src_shape)
 
-        t = slice_to_index(src_roi[0])
-        window = tuple(map(slice_to_window, src_roi[1:3]))
+            t = slice_to_index(src_roi[0])
+            window = tuple(map(slice_to_window, src_roi[1:3]))
 
-        return f.read(indexes=t, window=window)
+            return f.read(indexes=t, window=window)
+
+    if isinstance(bands, str):
+        bands = [bands]
+
+    return {name: read_band(fname, name, src_roi)
+            for name in bands}
 
 
 def plot_benchmark_results(stats, fig,
@@ -143,7 +168,6 @@ def plot_benchmark_results(stats, fig,
     ax.yaxis.set_label_text('secs')
     ax.xaxis.set_label_text('# Worker Threads')
     set_0_based(ax, max_time)
-    #ax.axis([0.5, x_ax_max, 0, 175])
 
     ax = axs[2]
     ax.set_title('Efficiency per worker')
