@@ -2,6 +2,7 @@ from types import SimpleNamespace
 import numpy as np
 import h5py
 import rasterio
+import xarray as xr
 
 from .utils import (
     Timer,
@@ -14,10 +15,13 @@ from .utils import (
 
 
 def size_in_bytes(o):
-    if isinstance(o, np.ndarray):
+    if isinstance(o, (np.ndarray, xr.DataArray)):
         return o.size*o.dtype.itemsize
     if isinstance(o, dict):
         return size_in_bytes(o.values())
+    if isinstance(o, xr.Dataset):
+        return size_in_bytes([da.values for da in o.data_vars.values()])
+
     return sum(size_in_bytes(x) for x in o)
 
 
