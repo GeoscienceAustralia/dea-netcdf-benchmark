@@ -22,13 +22,13 @@ _LOG = logging.getLogger(__name__)
 
 NetcdfFileInfo = namedtuple('NetcdfFileInfo', ['bands', 'dims', 'grids'])
 DimensionInfo = namedtuple('DimensionInfo', ['name', 'shape', 'dtype'])
-BandInfo = namedtuple('BandInfo', ['name', 'shape', 'dtype', 'dims', 'chunks', 'grid_mapping', 'nodata'])
+BandInfo = namedtuple('BandInfo', ['name', 'shape', 'dtype', 'dims', 'chunks', 'grid_mapping', 'nodata', 'units'])
 
 
 def _parse_info(info_dict):
     """ Converts dictionaries into named tuples
     """
-    def mk_band_info(name, shape=None, dtype=None, dims=None, chunks=None, grid_mapping=None, nodata=None):
+    def mk_band_info(name, shape=None, dtype=None, dims=None, chunks=None, grid_mapping=None, nodata=None, units=None):
         return BandInfo(**locals())
 
     bands = {k: mk_band_info(k, **v) for k, v in info_dict['bands'].items()}
@@ -138,13 +138,15 @@ class ExternalNetcdfReader(object):
                          chunks=ds.chunks,
                          dtype=ds.dtype.name,
                          dims=nc_dims(ds))
-            grid_mapping = h5_extract_attrs(ds, 'grid_mapping')
-            if grid_mapping is not None:
-                props.update({'grid_mapping': grid_mapping})
 
-            nodata = h5_extract_attrs(ds, '_FillValue', unwrap_arrays=True)
-            if nodata is not None:
-                props.update({'nodata': nodata})
+            def maybe_add(**kwargs):
+                for k, v in kwargs.items():
+                    if v is not None:
+                        props[k] = v
+
+            maybe_add(grid_mapping=h5_extract_attrs(ds, 'grid_mapping'),
+                      nodata=h5_extract_attrs(ds, '_FillValue', unwrap_arrays=True),
+                      units=h5_extract_attrs(ds, 'units', unwrap_arrays=True))
 
             return props
 
@@ -559,17 +561,30 @@ class MultiProcNetcdfReader(object):
 
         return ds
 
+    def _attrs(self, m):
+        attrs = {}
+        if m.nodata is not None:
+            attrs['nodata'] = m.nodata
+
+        if m.units is not None:
+            attrs['units'] = m.units
+
+        if m.grid_mapping is not None:
+            assert m.grid_mapping in self._info.grids, "Mismatched grid mapping reference: " + m.grid_mapping
+            grid = self._info.grids[m.grid_mapping]
+            crs_wkt = grid.get('crs_wkt')
+            if crs_wkt is not None:
+                attrs['crs'] = crs_wkt
+
+        return attrs
+
     def _allocate(self, measurements, shape, dims):
         def data_array(m):
-            attrs = {}
-            if m.nodata is not None:
-                attrs['nodata'] = m.nodata
-
             return xr.DataArray(np.ndarray(shape, dtype=m.dtype),
                                 name=m.name,
                                 dims=list(dims),
                                 coords=dims,
-                                attrs=attrs)
+                                attrs=self._attrs(m))
 
         return xr.Dataset({m.name: data_array(m) for m in measurements})
 

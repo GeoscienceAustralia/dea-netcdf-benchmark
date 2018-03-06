@@ -122,7 +122,7 @@ def test_reader_factory():
         print(list(dims))
 
         xx = f.read()
-        print(list(xx))
+        print(list(xx.data_vars))
         assert xx is not None
 
 
