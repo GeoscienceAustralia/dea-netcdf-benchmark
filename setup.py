@@ -30,6 +30,7 @@ setup(
     packages=find_packages(),
     install_requires=[
         'numpy',
+        'xarray',
         'h5py',
         'rasterio',
     ],

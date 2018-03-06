@@ -1,5 +1,6 @@
 import warnings
 import numpy as np
+import xarray as xr
 import logging
 from multiprocessing.sharedctypes import RawArray
 import concurrent.futures
@@ -368,11 +369,39 @@ class MultiProcNetcdfReader(object):
         self._ff = []
         self._info = None
         self._scheduled = None
+        self._coords = {}
         self._prepare()
 
     @property
     def info(self):
         return self._info
+
+    def load_coords(self, names=None):
+        """ Load coordinates into internal cache
+
+        :param [str]|str names: Names of dimensions to load coordinates for
+        """
+        if names is None:
+            names = list(self._info.dims)
+        if isinstance(names, str):
+            names = [names]
+
+        offset = 0
+        f = self._ff[0]
+
+        def read(dim):
+            my_view = self._state.view.asarray(offset, dim.shape, dim.dtype)
+
+            if f.read_to_shared(dim.name, np.s_[:], offset=offset).result():
+                return my_view.copy()
+            else:
+                raise IOError('Failed to read dimension: %s' % dim.name)
+
+        for n in names:
+            assert n in self._info.dims, "No dimension named: " + n
+
+            if n not in self._coords:
+                self._coords[n] = read(self._info.dims[n])
 
     def _prepare(self):
         self._ff = NetcdfProcProxy.parallel_open(self._fname, self._procs)
@@ -447,29 +476,133 @@ class MultiProcNetcdfReader(object):
             self._finalise(r)
         self._scheduled = xx.not_done
 
-    def read_dims(self, measurement, src_roi=None):
-        assert measurement in self._info.bands, "No such measurement"
-        dims = [self._info.dims[d] for d in self._info.bands[measurement].dims]
+    def _get_coords_values(self, dim, roi):
+        dim_shape = shape_from_slice(roi, dim.shape)
+
+        if dim.name not in self._coords and dim_shape == dim.shape:
+            self.load_coords(dim.name)
+
+        if dim.name in self._coords:
+            # Use cache
+            return self._coords[dim.name][roi]
+
+        # Load just the needed data
         f = self._ff[0]
+        offset = 0
+        my_view = self._state.view.asarray(offset, dim_shape, dim.dtype)
+
+        if not f.read_to_shared(dim.name, roi, offset=offset).result():
+            raise IOError('Failed to read dimension: %s' % dim.name)
+
+        return my_view.copy()
+
+    def read_coords(self, measurement, src_roi=None):
+        """ Read or lookup from cache coordinates for a given measurement or dimension
+
+        :param str measurement: Name of measurement or dimension for which to read coordinates
+
+        :param src_roi: Optional region of interest. Output of `np.s_[...]`.
+
+        :returns OrderedDict(str->numpy.ndarray): Ordered dictionary mapping dimension name to coordinate values.
+        """
+        assert measurement in self._info.bands or measurement in self._info.dims, "No such measurement/dimension"
+        if measurement in self._info.dims:
+            dims = [self._info.dims[measurement]]
+        else:
+            dims = [self._info.dims[d] for d in self._info.bands[measurement].dims]
+
+        if isinstance(src_roi, slice):
+            src_roi = (src_roi,)
 
         out = OrderedDict()
-        offset = 0
 
         for i, dim in enumerate(dims):
             roi = slice(None, None) if src_roi is None else src_roi[i]
-            dim_shape = shape_from_slice(roi, dim.shape)
-            my_view = self._state.view.asarray(offset, dim_shape, dim.dtype)
 
-            if f.read_to_shared(dim.name, roi, offset=offset).result():
-                out[dim.name] = my_view.copy()
-            else:
-                raise IOError('Failed to read dimension: %s' % dim.name)
+            out[dim.name] = self._get_coords_values(dim, roi)
+        return out
+
+    def _empty_coords(self, measurement, src_roi=None):
+        assert measurement in self._info.bands or measurement in self._info.dims, "No such measurement/dimension"
+        if measurement in self._info.dims:
+            dims = [self._info.dims[measurement]]
+        else:
+            dims = [self._info.dims[d] for d in self._info.bands[measurement].dims]
+
+        if isinstance(src_roi, slice):
+            src_roi = (src_roi,)
+
+        out = OrderedDict()
+
+        for i, dim in enumerate(dims):
+            roi = slice(None, None) if src_roi is None else src_roi[i]
+            shape = shape_from_slice(roi, dim.shape)
+            out[dim.name] = np.zeros(shape, dtype=dim.dtype)
 
         return out
+
+    def update_coords(self, ds, src_roi=None):
+        """Given a pre-allocated dataset of compatible shape update just coordinate
+        values for a given ROI.
+
+        :param xarray.Dataset ds: Pre-allocated dataset
+        :src_roi: Region of interest (in source file pixel coordinates)
+        """
+        if src_roi is None:
+            src_roi = tuple(slice(None, None) for _ in ds.coords)
+        elif isinstance(src_roi, slice):
+            src_roi = (src_roi,)
+
+        for dim_name, roi in zip(ds.coords, src_roi):
+            assert dim_name in self._info.dims, "No such dimension {}".format(dim_name)
+            ds.coords[dim_name] = self._get_coords_values(self._info.dims[dim_name], roi)
+
+        return ds
+
+    def _allocate(self, measurements, shape, dims):
+        def data_array(m):
+            attrs = {}
+            if m.nodata is not None:
+                attrs['nodata'] = m.nodata
+
+            return xr.DataArray(np.ndarray(shape, dtype=m.dtype),
+                                name=m.name,
+                                dims=list(dims),
+                                coords=dims,
+                                attrs=attrs)
+
+        return xr.Dataset({m.name: data_array(m) for m in measurements})
+
+    def allocate(self, measurements=None, src_roi=None, fill_coords=False):
+        """Create `xarray.Dataset`, but not load pixel data yet. Note that it might read
+        coordinate data though. Unless it was cached already.
+
+        :param [str] measurements: List of measurements
+        :param src_roi: Optionally region of interest can be supplied
+        :param bool fill_coords: When True fill coordinate values, else leave them at 0
+
+        :returns xarray.Dataset:
+        :throws IOError: when reading coordinate data fails.
+        """
+        measurements, src_shape = self._check_measurements(measurements)
+
+        if src_roi is None:
+            src_roi = select_all(src_shape)
+
+        dst_shape = shape_from_slice(src_roi, src_shape)
+
+        if fill_coords:
+            dims = self.read_coords(measurements[0].name, src_roi)
+        else:
+            dims = self._empty_coords(measurements[0].name, src_roi)
+
+        return self._allocate(measurements, dst_shape, dims)
 
     def read(self,
              measurements=None,
              src_roi=None,
+             dst=None,
+             update_coords=True,
              chunk_scale=None):
         """Read data from a file in parallel
 
@@ -477,12 +610,21 @@ class MultiProcNetcdfReader(object):
 
         :param src_roi: Region of interest to read (e.g. `numpy.s_[:5,:,:]`)
 
+        :param [xarray.Dataset] dst: Pre-allocated dataset, see `allocate`
+
+        :param bool update_coords: Only meaningful when `dst` is supplied, by
+        default will update coordinates with values for a given ROI, but can be
+        skipped if coordinates already contain valid data for example.
+
         :param chunk_scale: A tuple of integers, a scaling factors for each
         dimension of measurements being read (e.g. (1,2,2) will read 4 block at
         a time in 2x2 spatial arrangement)
 
         """
         # pylint: disable=too-many-locals
+
+        if measurements is None and (dst is not None):
+            measurements = list(dst.data_vars)
 
         measurements, src_shape = self._check_measurements(measurements)
 
@@ -492,8 +634,23 @@ class MultiProcNetcdfReader(object):
         dst_shape = shape_from_slice(src_roi, src_shape)
         dst_roi = dst_from_src(src_roi, src_shape)
 
-        out = {m.name: np.ndarray(dst_shape, dtype=m.dtype)
-               for m in measurements}
+        if dst is None:
+            dst = self._allocate(measurements,
+                                 dst_shape,
+                                 self.read_coords(measurements[0].name, src_roi))
+        else:
+            for m in measurements:
+                assert m.name in dst.data_vars, 'No slot for "{}"'.format(m.name)
+
+                da = dst.data_vars[m.name]
+
+                assert da.shape == dst_shape, 'Shape mismatch "{}", have {}, expect {}'.format(
+                    m.name, da.shape, dst_shape)
+                assert da.dtype == m.dtype, 'Data type mismatch "{}", have {}, expect {}'.format(
+                    m.name, da.dtype, m.dtype)
+
+            if update_coords:
+                self.update_coords(dst, src_roi)
 
         read_to_shared = RoundRobinSelector([f.read_to_shared for f in self._ff])
         slot_alloc, read_chunk = self._init_alloc(measurements, chunk_scale)
@@ -511,10 +668,10 @@ class MultiProcNetcdfReader(object):
         for roi in block_iterator(read_chunk, src_roi, src_shape):
             block_shape = shape_from_slice(roi)
             for m in measurements:
-                dst = out[m.name]
+                dst_array = dst[m.name].values
                 slot, my_view = get_slot(block_shape, m.dtype)
                 future = read_to_shared(m.name, roi, slot.offset)
-                self._pack_user_data(future, slot, dst_roi(roi), my_view, dst)
+                self._pack_user_data(future, slot, dst_roi(roi), my_view, dst_array)
                 self._scheduled.add(future)
 
             n_total, n_min = read_to_shared.current_load()
@@ -523,7 +680,7 @@ class MultiProcNetcdfReader(object):
                 self._process_results(timeout=0.05)
 
         self._process_results(all_completed=True)
-        return out
+        return dst
 
     def close(self):
         """ Close the file.
