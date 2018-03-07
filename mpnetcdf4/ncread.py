@@ -477,6 +477,14 @@ class MultiProcNetcdfReader(object):
             self._finalise(r)
         self._scheduled = xx.not_done
 
+    def _drain_results_queue(self):
+        """Rather than waiting for all to complete followed by large final copy of in
+        flight data into the destination, interleave waiting and completing
+        tasks for better latency.
+        """
+        while len(self._scheduled) > 0:
+            self._process_results()
+
     def _get_coords_values(self, dim, roi):
         dim_shape = shape_from_slice(roi, dim.shape)
 
@@ -693,7 +701,7 @@ class MultiProcNetcdfReader(object):
             if n_min > 3:
                 self._process_results(timeout=0.05)
 
-        self._process_results(all_completed=True)
+        self._drain_results_queue()
         return dst
 
     def close(self):
