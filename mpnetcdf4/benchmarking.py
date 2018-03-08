@@ -137,6 +137,54 @@ def local_read_rio(fname, bands, src_roi=None):
             for name in bands}
 
 
+def run_benchmark(pp, mp_factory=None, dst=None):
+    """
+    pp.fname        -- File to read
+    pp.measurements -- Which bands to load
+    pp.src_roi      -- Region of interest to read, can be None
+    pp.nprocs       -- Number of processes to use
+    pp.mb           -- Size of shared memory in Mb
+    pp.chunk_scale  -- Read chunk scaler, can be None to read one chunk at a time
+
+    mp_factory      -- Optional pre-allocated `ReaderFactory`
+    dst             -- Optional pre-allocated destination
+
+    :returns: out, stats
+    """
+    from copy import copy
+    from .ncread import ReaderFactory
+    from .utils import Timer
+
+    with Timer() as t_total:
+        if mp_factory is None:
+            with Timer(message='Prepare x%d' % pp.nprocs) as t:
+                mp_factory = ReaderFactory(pp.nprocs, mb=pp.mb)
+
+            t_prepare = t.elapsed
+        else:
+            t_prepare = 0
+
+        with Timer(message='Open x%d' % pp.nprocs) as t:
+            f = mp_factory.open(pp.fname, pp.nprocs)
+
+        t_open = t.elapsed
+
+        read = with_stats(f.read, message='Read x%d' % pp.nprocs)
+
+        out, stats = read(measurements=pp.measurements,
+                          src_roi=pp.src_roi,
+                          dst=dst,
+                          chunk_scale=pp.chunk_scale)
+
+    stats.t_total = t_total.elapsed
+    stats.t_prepare = t_prepare
+    stats.t_open = t_open
+    stats.params = copy(pp)
+    stats.params.dst_supplied = dst is not None
+
+    return out, stats
+
+
 def plot_benchmark_results(stats, fig,
                            max_throughput=None,
                            base_throughput=None,
