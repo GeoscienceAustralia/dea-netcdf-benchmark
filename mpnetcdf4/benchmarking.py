@@ -139,11 +139,13 @@ def local_read_rio(fname, bands, src_roi=None):
 
 def plot_benchmark_results(stats, fig,
                            max_throughput=None,
+                           base_throughput=None,
                            max_time=None):
     st = np.r_[[(s.params.nprocs, s.t_total, s.elapsed, s.mb) for s in stats]]
 
     nprocs, t_total, t_read, mb = st.T
-    base_throughput = mb[0]/t_total[0]
+    if base_throughput is None:
+        base_throughput = (mb/(t_total*nprocs)).max()
 
     x_ax_max = nprocs.max() + 0.5
 
