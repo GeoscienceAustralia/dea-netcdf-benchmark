@@ -137,7 +137,7 @@ def local_read_rio(fname, bands, src_roi=None):
             for name in bands}
 
 
-def run_benchmark(pp, mp_factory=None, dst=None):
+def run_benchmark(pp, mp_factory=None, dst=None, **pp_overrides):
     """
     pp.fname        -- File to read
     pp.measurements -- Which bands to load
@@ -149,11 +149,18 @@ def run_benchmark(pp, mp_factory=None, dst=None):
     mp_factory      -- Optional pre-allocated `ReaderFactory`
     dst             -- Optional pre-allocated destination
 
+    **pp_overrides  -- Override any of the above parameters before running
+
     :returns: out, stats
     """
     from copy import copy
     from .ncread import ReaderFactory
     from .utils import Timer
+
+    pp = copy(pp)
+
+    for k, v in pp_overrides.items():
+        setattr(pp, k, v)
 
     with Timer() as t_total:
         if mp_factory is None:
@@ -179,7 +186,7 @@ def run_benchmark(pp, mp_factory=None, dst=None):
     stats.t_total = t_total.elapsed
     stats.t_prepare = t_prepare
     stats.t_open = t_open
-    stats.params = copy(pp)
+    stats.params = pp
     stats.params.dst_supplied = dst is not None
 
     return out, stats
