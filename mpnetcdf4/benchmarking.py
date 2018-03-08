@@ -232,3 +232,40 @@ def plot_benchmark_results(stats, fig,
     ax.yaxis.set_label_text('%')
     ax.xaxis.set_label_text('# Worker Threads')
     set_0_based(ax, 110)
+
+
+def find_next_available_file(fname_pattern, max_n=1000, start=1):
+    """
+    :param str fname_pattern: File name pattern using "%d" style formatting e.g. "result-%03d.png"
+    :param int max_n: Check at most that many files before giving up and returning None
+    :param int start: Where to start counting from, default is 1
+    """
+    from pathlib import Path
+
+    for i in range(start, max_n):
+        fname = fname_pattern % i
+        if not Path(fname).exists():
+            return fname
+
+    return None
+
+
+def dump_as_pickle(data, fname_pattern, max_n=1000, start=1):
+    """
+    :param data: Object to pickle
+    :param str fname_pattern: File name pattern using "%d" style formatting e.g. "result-%03d.pickle"
+    :param int max_n: Check at most that many files before giving up and failing
+    :param int start: Where to start counting from, default is 1
+    :return str: File name to which things were written
+    """
+    import pickle
+
+    fname = find_next_available_file(fname_pattern, max_n=max_n, start=start)
+
+    if fname is None:
+        return None
+
+    with open(fname, 'wb') as f:
+        pickle.dump(data, f)
+
+    return fname
