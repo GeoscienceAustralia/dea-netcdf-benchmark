@@ -674,30 +674,40 @@ class MultiProcNetcdfReader(object):
             if update_coords:
                 self.update_coords(dst, src_roi)
 
+        def data_pump(read_to_shared, slot_alloc, read_chunk):
+            def schedule_work(name, roi, slot, my_view, dst_array):
+                future = read_to_shared(name, roi, slot.offset)
+                self._pack_user_data(future, slot, dst_roi(roi), my_view, dst_array)
+                return future
+
+            def alloc_one(shape, dtype):
+                slot, my_view = slot_alloc(shape, dtype)
+                while slot is None:
+                    yield None
+                    slot, my_view = slot_alloc(shape, dtype)
+                yield slot, my_view
+
+            def mk_worker(m, roi):
+                return (lambda x: None if x is None else
+                        schedule_work(m.name, roi, *x, dst[m.name].values))
+
+            for roi in block_iterator(read_chunk, src_roi, src_shape):
+                block_shape = shape_from_slice(roi)
+                for m in measurements:
+                    yield from map(mk_worker(m, roi),
+                                   alloc_one(block_shape, m.dtype))
+
         read_to_shared = RoundRobinSelector([f.read_to_shared for f in self._ff])
         slot_alloc, read_chunk = self._init_alloc(measurements, chunk_scale)
         self._scheduled = set()
 
-        def get_slot(shape, dtype):
-            (slot, my_view) = slot_alloc(shape, dtype)
-
-            while slot is None:
-                self._process_results()
-                (slot, my_view) = slot_alloc(shape, dtype)
-
-            return (slot, my_view)
-
-        for roi in block_iterator(read_chunk, src_roi, src_shape):
-            block_shape = shape_from_slice(roi)
-            for m in measurements:
-                dst_array = dst[m.name].values
-                slot, my_view = get_slot(block_shape, m.dtype)
-                future = read_to_shared(m.name, roi, slot.offset)
-                self._pack_user_data(future, slot, dst_roi(roi), my_view, dst_array)
+        for future in data_pump(read_to_shared, slot_alloc, read_chunk):
+            if future is not None:
                 self._scheduled.add(future)
+            else:
+                self._process_results(timeout=0.05)
 
             n_total, n_min = read_to_shared.current_load()
-
             if n_min > 3:
                 self._process_results(timeout=0.05)
 
