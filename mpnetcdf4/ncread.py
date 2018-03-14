@@ -771,7 +771,7 @@ class ReaderFactory(object):
         self._state = SharedState(mb=mb)
         self._procs = self._state.make_procs(num_workers)
 
-    def open(self, fname, num_workers=None):
+    def open(self, fname, num_workers=None, workers=None):
         """Open file for reading.
 
         :param str fname: path to a netcdf file
@@ -779,14 +779,30 @@ class ReaderFactory(object):
         :param int num_workers: Number of worker threads to use, should be
         smaller or equal to the number of workers configured during
         construction. This is useful when benchmarking as it allows to ignore
-        "warmup" costs per process. When not supplied will use as many worker
+        "warmup" costs per process.
+
+        :param list|tuple|slice workers: Select which workers to use, this can
+        either be a slice object or a list/tuple of indexes.
+
+        When neither workers nor num_workwers are supplied will use as many worker
         threads as were configured during construction.
+
         """
-        if num_workers is None:
+        assert workers is None or isinstance(workers, (tuple, list, slice))
+
+        if num_workers is None and workers is None:
             return MultiProcNetcdfReader(fname, self._procs, self._state)
 
-        assert num_workers <= len(self._procs), "Can't request that many workers"
-        return MultiProcNetcdfReader(fname, self._procs[:num_workers], self._state)
+        if workers is None and num_workers is not None:
+            assert num_workers <= len(self._procs), "Can't request that many workers"
+            workers = slice(0, num_workers)
+
+        if isinstance(workers, (list, tuple)):
+            procs = tuple(self._procs[i] for i in workers)
+        elif isinstance(workers, slice):
+            procs = self._procs[workers]
+
+        return MultiProcNetcdfReader(fname, procs, self._state)
 
 
 def nc_open(fname, num_workers, mb=None):
