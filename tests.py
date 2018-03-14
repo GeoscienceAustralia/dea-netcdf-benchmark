@@ -44,10 +44,19 @@ def test_slot_alloc():
     slot_alloc, _ = st.slot_allocator((1, 200, 200), 'int16')
     assert slot_alloc is not None
 
-    (s1, a1) = slot_alloc()
-    (s2, a2) = slot_alloc()
-    print(s1.id, a1)
-    print(s2.id, a2)
+    s1 = slot_alloc()
+    s2 = slot_alloc()
+
+    assert s1 is not None
+    assert s1.view is not None
+    assert s1.view.shape == (1, 200, 200)
+
+    assert s2 is not None
+    assert s2.view is not None
+    assert s2.view.shape == (1, 200, 200)
+
+    print(s1.id, s1.view.shape)
+    print(s2.id, s2.view.shape)
 
 
 def test_named_cache():

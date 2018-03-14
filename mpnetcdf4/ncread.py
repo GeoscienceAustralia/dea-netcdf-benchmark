@@ -222,11 +222,9 @@ class SharedState(object):
             return None, cache
 
         def alloc(shape=chunk_shape, dtype=dtype):
-            empty = (None, None)
-
             slot = cache.alloc()
             if slot is None:
-                return empty
+                return None
 
             a = cache.asarray(slot, shape, dtype)
 
@@ -235,7 +233,8 @@ class SharedState(object):
                 _LOG.error('Something went wrong: chunk is too small suddenly')
                 raise ValueError('Shape too big I guess, or unexpected state changes')
 
-            return (slot, a)
+            slot.view = a
+            return slot
 
         return alloc, cache
 
@@ -366,24 +365,24 @@ class AsyncDataSink(object):
         self._scheduled = set()
 
     @staticmethod
-    def pack_user_data(future, slot, my_view, dst, roi):
+    def pack_user_data(future, slot, dst, roi):
         # pylint: disable=protected-access
-        future._userdata = (slot, my_view, dst, roi)
+        future._userdata = (slot, dst, roi)
         return future
 
     @staticmethod
     def unpack_user_data(future):
         # pylint: disable=protected-access
-        slot, my_view, dst, roi = future._userdata
-        return (slot, my_view, dst, roi)
+        slot, dst, roi = future._userdata
+        return (slot, dst, roi)
 
     @staticmethod
     def _finalise(future):
         ok = False
-        slot, my_view, dst, roi = AsyncDataSink.unpack_user_data(future)
+        slot, dst, roi = AsyncDataSink.unpack_user_data(future)
         try:
             if future.result():
-                dst[roi] = my_view
+                dst[roi] = slot.view
                 ok = True
             else:
                 _LOG.error('Failed one of the reads: %s %d', repr(roi), slot.id)
@@ -689,20 +688,20 @@ class MultiProcNetcdfReader(object):
         def data_pump(read_to_shared, slot_alloc, read_chunk):
             pack_user_data = AsyncDataSink.pack_user_data
 
-            def schedule_work(name, roi, slot, my_view, dst_array):
+            def schedule_work(name, roi, slot, dst_array):
                 future = read_to_shared(name, roi, slot.offset)
-                return pack_user_data(future, slot, my_view, dst_array, dst_roi(roi))
+                return pack_user_data(future, slot, dst_array, dst_roi(roi))
 
             def alloc_one(shape, dtype):
-                slot, my_view = slot_alloc(shape, dtype)
+                slot = slot_alloc(shape, dtype)
                 while slot is None:
                     yield None
-                    slot, my_view = slot_alloc(shape, dtype)
-                yield slot, my_view
+                    slot = slot_alloc(shape, dtype)
+                yield slot
 
             def mk_worker(m, roi):
-                return (lambda x: None if x is None else
-                        schedule_work(m.name, roi, *x, dst[m.name].values))
+                return (lambda slot: None if slot is None else
+                        schedule_work(m.name, roi, slot, dst[m.name].values))
 
             for roi in block_iterator(read_chunk, src_roi, src_shape):
                 block_shape = shape_from_slice(roi)

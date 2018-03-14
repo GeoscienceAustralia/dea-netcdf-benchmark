@@ -244,14 +244,23 @@ class SharedBufferView(object):
 
 class ChunkStoreAlloc(object):
     class Slot(object):
-        def __init__(self, id, offset, ondone):
+        def __init__(self, id, offset, ondone, view=None):
             self._id = id
             self._offset = offset
             self._ondone = ondone
+            self._view = view
 
         def __del__(self):
             if self._ondone:
                 self._ondone(self._id)
+
+        @property
+        def view(self):
+            return self._view
+
+        @view.setter
+        def view(self, view):
+            self._view = view
 
         @property
         def id(self):
