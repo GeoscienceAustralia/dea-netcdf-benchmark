@@ -10,6 +10,7 @@ from types import SimpleNamespace
 
 from .utils import (NamedObjectCache,
                     shape_from_slice,
+                    norm_selection,
                     array_memsize,
                     SharedBufferView,
                     ChunkStoreAlloc,
@@ -631,6 +632,51 @@ class MultiProcNetcdfReader(object):
 
         return self._allocate(measurements, dst_shape, dims)
 
+    @staticmethod
+    def _check_if_compatible(dst, src_roi, measurements):
+        dst_shape = shape_from_slice(src_roi)
+
+        for m in measurements:
+            assert m.name in dst.data_vars, 'No slot for "{}"'.format(m.name)
+
+            da = dst.data_vars[m.name]
+
+            assert da.shape == dst_shape, 'Shape mismatch "{}", have {}, expect {}'.format(
+                m.name, da.shape, dst_shape)
+            assert da.dtype == m.dtype, 'Data type mismatch "{}", have {}, expect {}'.format(
+                m.name, da.dtype, m.dtype)
+
+    @staticmethod
+    def _data_pump(read_to_shared,
+                   src_roi,
+                   measurements,
+                   slot_alloc,
+                   read_chunk,
+                   dst):
+        pack_user_data = AsyncDataSink.pack_user_data
+        dst_roi = dst_from_src(src_roi)
+
+        def schedule_work(name, roi, slot, dst_array):
+            future = read_to_shared(name, roi, slot.offset)
+            return pack_user_data(future, slot, dst_array, dst_roi(roi))
+
+        def alloc_one(shape, dtype):
+            slot = slot_alloc(shape, dtype)
+            while slot is None:
+                yield None
+                slot = slot_alloc(shape, dtype)
+            yield slot
+
+        def mk_worker(m, roi):
+            return (lambda slot: None if slot is None else
+                    schedule_work(m.name, roi, slot, dst[m.name].values))
+
+        for roi in block_iterator(read_chunk, src_roi):
+            block_shape = shape_from_slice(roi)
+            for m in measurements:
+                yield from map(mk_worker(m, roi),
+                               alloc_one(block_shape, m.dtype))
+
     def read(self,
              measurements=None,
              src_roi=None,
@@ -650,12 +696,10 @@ class MultiProcNetcdfReader(object):
         skipped if coordinates already contain valid data for example.
 
         :param chunk_scale: A tuple of integers, a scaling factors for each
-        dimension of measurements being read (e.g. (1,2,2) will read 4 block at
+        dimension of measurements being read (e.g. (1,2,2) will read 4 blocks at
         a time in 2x2 spatial arrangement)
 
         """
-        # pylint: disable=too-many-locals
-
         if measurements is None and (dst is not None):
             measurements = list(dst.data_vars)
 
@@ -664,57 +708,30 @@ class MultiProcNetcdfReader(object):
         if src_roi is None:
             src_roi = select_all(src_shape)
 
-        dst_shape = shape_from_slice(src_roi, src_shape)
-        dst_roi = dst_from_src(src_roi, src_shape)
+        src_roi = norm_selection(src_roi, src_shape)
 
         if dst is None:
             dst = self._allocate(measurements,
-                                 dst_shape,
+                                 shape_from_slice(src_roi),
                                  self.read_coords(measurements[0].name, src_roi))
         else:
-            for m in measurements:
-                assert m.name in dst.data_vars, 'No slot for "{}"'.format(m.name)
-
-                da = dst.data_vars[m.name]
-
-                assert da.shape == dst_shape, 'Shape mismatch "{}", have {}, expect {}'.format(
-                    m.name, da.shape, dst_shape)
-                assert da.dtype == m.dtype, 'Data type mismatch "{}", have {}, expect {}'.format(
-                    m.name, da.dtype, m.dtype)
-
+            self._check_if_compatible(dst, src_roi, measurements)
             if update_coords:
                 self.update_coords(dst, src_roi)
 
-        def data_pump(read_to_shared, slot_alloc, read_chunk):
-            pack_user_data = AsyncDataSink.pack_user_data
-
-            def schedule_work(name, roi, slot, dst_array):
-                future = read_to_shared(name, roi, slot.offset)
-                return pack_user_data(future, slot, dst_array, dst_roi(roi))
-
-            def alloc_one(shape, dtype):
-                slot = slot_alloc(shape, dtype)
-                while slot is None:
-                    yield None
-                    slot = slot_alloc(shape, dtype)
-                yield slot
-
-            def mk_worker(m, roi):
-                return (lambda slot: None if slot is None else
-                        schedule_work(m.name, roi, slot, dst[m.name].values))
-
-            for roi in block_iterator(read_chunk, src_roi, src_shape):
-                block_shape = shape_from_slice(roi)
-                for m in measurements:
-                    yield from map(mk_worker(m, roi),
-                                   alloc_one(block_shape, m.dtype))
+        slot_alloc, read_chunk = self._init_alloc(measurements, chunk_scale)
 
         read_to_shared = RoundRobinSelector([f.read_to_shared for f in self._ff])
-        slot_alloc, read_chunk = self._init_alloc(measurements, chunk_scale)
+        data_pump_it = MultiProcNetcdfReader._data_pump(read_to_shared,
+                                                        src_roi,
+                                                        measurements,
+                                                        slot_alloc,
+                                                        read_chunk,
+                                                        dst)
 
         sink = AsyncDataSink()
 
-        for future in data_pump(read_to_shared, slot_alloc, read_chunk):
+        for future in data_pump_it:
             if future is not None:
                 sink.add(future)
             else:
