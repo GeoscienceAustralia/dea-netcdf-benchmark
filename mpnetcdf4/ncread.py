@@ -361,6 +361,60 @@ class RoundRobinSelector(object):
         return future
 
 
+class AsyncDataSink(object):
+    def __init__(self):
+        self._scheduled = set()
+
+    @staticmethod
+    def pack_user_data(future, slot, my_view, dst, roi):
+        # pylint: disable=protected-access
+        future._userdata = (slot, my_view, dst, roi)
+        return future
+
+    @staticmethod
+    def unpack_user_data(future):
+        # pylint: disable=protected-access
+        slot, my_view, dst, roi = future._userdata
+        return (slot, my_view, dst, roi)
+
+    @staticmethod
+    def _finalise(future):
+        ok = False
+        slot, my_view, dst, roi = AsyncDataSink.unpack_user_data(future)
+        try:
+            if future.result():
+                dst[roi] = my_view
+                ok = True
+            else:
+                _LOG.error('Failed one of the reads: %s %d', repr(roi), slot.id)
+        except Exception as e:  # pylint: disable=broad-except
+            _LOG.error('Failed with exception one of the reads: %s %d', repr(roi), slot.id)
+        finally:
+            slot.release()
+
+        return ok
+
+    def process_results(self, timeout=None, all_completed=False):
+        return_when = 'ALL_COMPLETED' if all_completed else 'FIRST_COMPLETED'
+        xx = concurrent.futures.wait(self._scheduled, return_when=return_when, timeout=timeout)
+        for r in xx.done:
+            self._finalise(r)
+        self._scheduled = xx.not_done
+
+    def drain_results_queue(self):
+        """Rather than waiting for all to complete followed by large final copy of in
+        flight data into the destination, interleave waiting and completing
+        tasks for better latency.
+        """
+        while len(self._scheduled) > 0:
+            self.process_results()
+
+    def add(self, future):
+        """ Append "packed" future to the queue
+        """
+        self._scheduled.add(future)
+
+
 class MultiProcNetcdfReader(object):
     @staticmethod
     def _prepare(fname, procs):
@@ -374,7 +428,6 @@ class MultiProcNetcdfReader(object):
         self._state = state
         (self._ff,
          self._info) = self._prepare(fname, procs)
-        self._scheduled = None
         self._coords = {}
 
     @property
@@ -443,50 +496,6 @@ class MultiProcNetcdfReader(object):
 
         slot_alloc, _ = self._state.slot_allocator(read_chunk, largest_dtype)
         return slot_alloc, read_chunk
-
-    @staticmethod
-    def _pack_user_data(future, slot, my_view, dst, roi):
-        # pylint: disable=protected-access
-        future._userdata = (slot, my_view, dst, roi)
-        return future
-
-    @staticmethod
-    def _unpack_user_data(future):
-        # pylint: disable=protected-access
-        slot, my_view, dst, roi = future._userdata
-        return (slot, my_view, dst, roi)
-
-    @staticmethod
-    def _finalise(future):
-        ok = False
-        slot, my_view, dst, roi = MultiProcNetcdfReader._unpack_user_data(future)
-        try:
-            if future.result():
-                dst[roi] = my_view
-                ok = True
-            else:
-                _LOG.error('Failed one of the reads: %s %d', repr(roi), slot.id)
-        except Exception as e:  # pylint: disable=broad-except
-            _LOG.error('Failed with exception one of the reads: %s %d', repr(roi), slot.id)
-        finally:
-            slot.release()
-
-        return ok
-
-    def _process_results(self, timeout=None, all_completed=False):
-        return_when = 'ALL_COMPLETED' if all_completed else 'FIRST_COMPLETED'
-        xx = concurrent.futures.wait(self._scheduled, return_when=return_when, timeout=timeout)
-        for r in xx.done:
-            self._finalise(r)
-        self._scheduled = xx.not_done
-
-    def _drain_results_queue(self):
-        """Rather than waiting for all to complete followed by large final copy of in
-        flight data into the destination, interleave waiting and completing
-        tasks for better latency.
-        """
-        while len(self._scheduled) > 0:
-            self._process_results()
 
     def _get_coords_values(self, dim, roi):
         dim_shape = shape_from_slice(roi, dim.shape)
@@ -678,10 +687,11 @@ class MultiProcNetcdfReader(object):
                 self.update_coords(dst, src_roi)
 
         def data_pump(read_to_shared, slot_alloc, read_chunk):
+            pack_user_data = AsyncDataSink.pack_user_data
+
             def schedule_work(name, roi, slot, my_view, dst_array):
                 future = read_to_shared(name, roi, slot.offset)
-                self._pack_user_data(future, slot, my_view, dst_array, dst_roi(roi))
-                return future
+                return pack_user_data(future, slot, my_view, dst_array, dst_roi(roi))
 
             def alloc_one(shape, dtype):
                 slot, my_view = slot_alloc(shape, dtype)
@@ -702,19 +712,20 @@ class MultiProcNetcdfReader(object):
 
         read_to_shared = RoundRobinSelector([f.read_to_shared for f in self._ff])
         slot_alloc, read_chunk = self._init_alloc(measurements, chunk_scale)
-        self._scheduled = set()
+
+        sink = AsyncDataSink()
 
         for future in data_pump(read_to_shared, slot_alloc, read_chunk):
             if future is not None:
-                self._scheduled.add(future)
+                sink.add(future)
             else:
-                self._process_results(timeout=0.05)
+                sink.process_results(timeout=0.05)
 
             n_total, n_min = read_to_shared.current_load()
             if n_min > 3:
-                self._process_results(timeout=0.05)
+                sink.process_results(timeout=0.05)
 
-        self._drain_results_queue()
+        sink.drain_results_queue()
         return dst
 
     def close(self):
