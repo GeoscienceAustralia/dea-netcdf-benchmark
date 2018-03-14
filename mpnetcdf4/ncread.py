@@ -461,7 +461,14 @@ class MultiProcNetcdfReader(object):
             if n not in self._coords:
                 self._coords[n] = read(self._info.dims[n])
 
-    def _check_measurements(self, measurements):
+    def check_measurements(self, measurements):
+        """
+        :param [str] measurements: List of measurement names, or a single name
+
+        :returns: List of band descriptors and a shape shared between all the bands
+
+        :throws ValueError: when requested measurements are missing or are not compatible with each other
+        """
         bands = self._info.bands
 
         if isinstance(measurements, str):
@@ -618,7 +625,7 @@ class MultiProcNetcdfReader(object):
         :returns xarray.Dataset:
         :throws IOError: when reading coordinate data fails.
         """
-        measurements, src_shape = self._check_measurements(measurements)
+        measurements, src_shape = self.check_measurements(measurements)
 
         if src_roi is None:
             src_roi = select_all(src_shape)
@@ -677,6 +684,33 @@ class MultiProcNetcdfReader(object):
                 yield from map(mk_worker(m, roi),
                                alloc_one(block_shape, m.dtype))
 
+    def mk_lazy_reader(self,
+                       measurements,
+                       src_roi,
+                       read_chunk,
+                       slot_alloc,
+                       dst):
+        """This is not meant to be used directly, needed for multi-file reader.
+
+        :param measurements: List of measurement descriptors (not just names)
+        :param src_roi: Normalised form of source roi (no open-ended slices allowed)
+        :param read_chunk: Shape of chunk to use for reading
+        :param slot_alloc: Shared slot allocator
+        :param dst: Pre-allocated destination storage
+
+        :returns: Iterator that generates None|Future objects, suitable for
+        feeding into AsyncDataSink
+
+        """
+        read_to_shared = RoundRobinSelector([f.read_to_shared for f in self._ff])
+
+        return MultiProcNetcdfReader._data_pump(read_to_shared,
+                                                src_roi,
+                                                measurements,
+                                                slot_alloc,
+                                                read_chunk,
+                                                dst)
+
     def read(self,
              measurements=None,
              src_roi=None,
@@ -703,7 +737,7 @@ class MultiProcNetcdfReader(object):
         if measurements is None and (dst is not None):
             measurements = list(dst.data_vars)
 
-        measurements, src_shape = self._check_measurements(measurements)
+        measurements, src_shape = self.check_measurements(measurements)
 
         if src_roi is None:
             src_roi = select_all(src_shape)
