@@ -444,19 +444,22 @@ class MultiProcNetcdfReader(object):
         slot_alloc, _ = self._state.slot_allocator(read_chunk, largest_dtype)
         return slot_alloc, read_chunk
 
-    def _pack_user_data(self, future, slot, roi, my_view, dst):
+    @staticmethod
+    def _pack_user_data(future, slot, my_view, dst, roi):
         # pylint: disable=protected-access
-        future._userdata = (slot, roi, my_view, dst)
+        future._userdata = (slot, my_view, dst, roi)
         return future
 
-    def _unpack_user_data(self, future):
+    @staticmethod
+    def _unpack_user_data(future):
         # pylint: disable=protected-access
-        slot, roi, my_view, dst = future._userdata
-        return (slot, roi, my_view, dst)
+        slot, my_view, dst, roi = future._userdata
+        return (slot, my_view, dst, roi)
 
-    def _finalise(self, future):
+    @staticmethod
+    def _finalise(future):
         ok = False
-        slot, roi, my_view, dst = self._unpack_user_data(future)
+        slot, my_view, dst, roi = MultiProcNetcdfReader._unpack_user_data(future)
         try:
             if future.result():
                 dst[roi] = my_view
@@ -677,7 +680,7 @@ class MultiProcNetcdfReader(object):
         def data_pump(read_to_shared, slot_alloc, read_chunk):
             def schedule_work(name, roi, slot, my_view, dst_array):
                 future = read_to_shared(name, roi, slot.offset)
-                self._pack_user_data(future, slot, dst_roi(roi), my_view, dst_array)
+                self._pack_user_data(future, slot, my_view, dst_array, dst_roi(roi))
                 return future
 
             def alloc_one(shape, dtype):
