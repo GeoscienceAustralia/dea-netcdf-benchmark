@@ -670,6 +670,13 @@ class MultiProcNetcdfReader(object):
             return pack_user_data(future, slot, dst_array, dst_roi(roi))
 
         def alloc_one(shape, dtype):
+
+            # Apply back pressure
+            _, n_min = read_to_shared.current_load()
+            while n_min > 3:
+                yield None
+                _, n_min = read_to_shared.current_load()
+
             slot = slot_alloc(shape, dtype)
             while slot is None:
                 yield None
