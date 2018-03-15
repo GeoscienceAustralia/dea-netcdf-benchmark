@@ -168,14 +168,14 @@ def dst_from_src(src_sel, src_shape=None):
         d_offset = (d_offset,)
 
     if functools.reduce(operator.add, d_offset) == 0:
-        return (lambda x: x)
+        return lambda x: x
 
     d_offset = tuple(map(operator.neg, d_offset))
 
     if is_1d:
         d_offset = d_offset[0]
 
-    return (lambda sel: offset_slice(sel, d_offset))
+    return lambda sel: offset_slice(sel, d_offset)
 
 
 def select_all(shape):
@@ -244,8 +244,8 @@ class SharedBufferView(object):
 
 class ChunkStoreAlloc(object):
     class Slot(object):
-        def __init__(self, id, offset, ondone, view=None):
-            self._id = id
+        def __init__(self, identifier, offset, ondone, view=None):
+            self._id = identifier
             self._offset = offset
             self._ondone = ondone
             self._view = view
@@ -301,7 +301,7 @@ class ChunkStoreAlloc(object):
 
         return ChunkStoreAlloc.Slot(idx,
                                     idx*self._chunk_sz,
-                                    lambda x: self._free.append(x))
+                                    self._free.append)
 
     def check_size(self, shape, dtype):
         return array_memsize(shape, dtype) <= self._chunk_sz
@@ -313,7 +313,7 @@ class ChunkStoreAlloc(object):
             return None
 
         if isinstance(slot, (self.Slot,)):
-            slot = slot._id
+            slot = slot.id
 
         if slot >= self._n:  # Not a valid slot id
             return None
@@ -334,6 +334,9 @@ class Timer(object):
         self.verbose = verbose
         self.message = message
         self.timer = default_timer
+        self.start = None
+        self.elapsed = None
+        self.elapsed_ms = None
 
     def __enter__(self):
         self.start = self.timer()
@@ -349,8 +352,6 @@ class Timer(object):
 
 
 def test_shape_from_slice():
-    import numpy as np
-
     assert shape_from_slice(np.s_[:], 10) == (10,)
     assert shape_from_slice(np.s_[:], (10,)) == (10,)
 
