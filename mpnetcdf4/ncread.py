@@ -693,6 +693,11 @@ class MultiProcNetcdfReader(object):
                 yield from map(mk_worker(m, roi),
                                alloc_one(block_shape, m.dtype))
 
+        n_total, _ = read_to_shared.current_load()
+        while n_total > 0:
+            yield None
+            n_total, _ = read_to_shared.current_load()
+
         if on_complete is not None:
             on_complete()
 
@@ -712,8 +717,11 @@ class MultiProcNetcdfReader(object):
         :param dst: Pre-allocated destination storage
 
         :param on_complete: If supplied will be called when iteration reaches
-        the end, note that this is "finished scheduling work", not "scheduled
-        work finished"
+        the end. By the time on_complete is called all the chunks were
+        scheduled and completed by the external process, however pixels might
+        still be in the sink queue to be copied over to the final destination.
+        So it's ok to close file inside the oncomplete method, but not ok to
+        use pixels until you drain the sink.
 
         :returns: Iterator that generates None|Future objects, suitable for
         feeding into AsyncDataSink
@@ -787,10 +795,6 @@ class MultiProcNetcdfReader(object):
             if future is not None:
                 sink.add(future)
             else:
-                sink.process_results(timeout=0.05)
-
-            n_total, n_min = read_to_shared.current_load()
-            if n_min > 3:
                 sink.process_results(timeout=0.05)
 
         sink.drain_results_queue()
