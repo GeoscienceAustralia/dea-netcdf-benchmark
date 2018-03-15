@@ -16,6 +16,7 @@ from .utils import (NamedObjectCache,
                     ChunkStoreAlloc,
                     select_all,
                     block_iterator,
+                    interleave_n,
                     dst_from_src)
 
 warnings.filterwarnings('ignore', module="h5py")
@@ -414,6 +415,25 @@ class AsyncDataSink(object):
         """ Append "packed" future to the queue
         """
         self._scheduled.add(future)
+
+    def pump_many(self, n, sources):
+        """Consume a bunch of sources up to n of them concurrently.
+
+        :param int n: How many sequences to process concurrently
+        :param sources: Is a sequence of sequences of future|None values.
+        """
+
+        def wrapped(s):
+            for future in s:
+                if future is not None:
+                    self.add(future)
+                yield future
+
+        for rr in interleave_n((wrapped(s) for s in sources), n):
+            if None in rr:
+                self.process_results(timeout=0.05)
+
+        self.drain_results_queue()
 
 
 class MultiProcNetcdfReader(object):
