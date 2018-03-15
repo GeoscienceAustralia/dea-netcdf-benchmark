@@ -1,6 +1,7 @@
 import threading
 import functools
 import itertools
+import collections
 import operator
 import numpy as np
 
@@ -322,6 +323,58 @@ class ChunkStoreAlloc(object):
         return self._view.asarray(offset, shape, dtype)
 
 
+def interleave_n(its, n):
+    """Given a bunch of iterators iterate through all of them until all exhausted
+    extracting values from upto n iterators at a time, it's kind of a mix
+    between zip and itertools.chain. This function is equivalent to
+    `itertools.chain` when `n=1` except result will be wrapped in a tuple.
+
+    This function is itself an iterator yielding tuples of results from source
+    iterators, tuple size is no more than n, but can be less and even empty.
+
+    :param its: Sequence yielding sequences to be processed
+    :param n: How many sequences to process concurrently
+    """
+
+    if not isinstance(its, collections.Iterator):
+        its = iter(its)
+
+    def next_all(active):
+        finished = []
+        rr = []
+        for it in active:
+            try:
+                rr.append(next(it))
+            except StopIteration:
+                finished.append(it)
+
+        for it in finished:
+            active.remove(it)
+
+        return tuple(rr), active
+
+    def pad_active(active, src):
+        if src is None:
+            return active, None
+
+        na = len(active)
+        if na >= n:
+            return active, src
+
+        new_its = list(itertools.islice(src, n - na))
+        if len(new_its) == 0:
+            return active, None
+
+        return active + new_its, src
+
+    active, its = pad_active([], its)
+
+    while len(active) > 0:
+        rr, active = next_all(active)
+        yield rr
+        active, its = pad_active(active, its)
+
+
 class Timer(object):
     def __init__(self, verbose=None, message=None):
         from timeit import default_timer
@@ -409,3 +462,19 @@ def test_slot_alloc():
 
     slot.release()
     assert store.nfree == store.total
+
+
+def test_interleav_n():
+    def get_its():
+        yield itertools.repeat('A', 4)
+        yield itertools.repeat('B', 10)
+        yield itertools.repeat('C', 2)
+        yield itertools.repeat('D', 3)
+
+    def check(n):
+        rr = list(interleave_n(get_its(), n))
+        flat = functools.reduce(operator.concat, rr)
+        assert len(flat) == 19
+
+    for n in [1, 2, 3, 33]:
+        check(n)
