@@ -339,7 +339,8 @@ class RoundRobinSelector(object):
 
         return min(*self._procs, key=lambda p: p.n)
 
-    def _done_callback(self, proc):
+    @staticmethod
+    def _done_callback(proc):
         def on_done(_):
             proc.n -= 1
         return on_done
