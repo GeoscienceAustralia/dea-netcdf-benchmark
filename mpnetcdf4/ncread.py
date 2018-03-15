@@ -659,7 +659,8 @@ class MultiProcNetcdfReader(object):
                    measurements,
                    slot_alloc,
                    read_chunk,
-                   dst):
+                   dst,
+                   on_complete=None):
         pack_user_data = AsyncDataSink.pack_user_data
         dst_roi = dst_from_src(src_roi)
 
@@ -684,12 +685,16 @@ class MultiProcNetcdfReader(object):
                 yield from map(mk_worker(m, roi),
                                alloc_one(block_shape, m.dtype))
 
+        if on_complete is not None:
+            on_complete()
+
     def mk_lazy_reader(self,
                        measurements,
                        src_roi,
                        read_chunk,
                        slot_alloc,
-                       dst):
+                       dst,
+                       on_complete=None):
         """This is not meant to be used directly, needed for multi-file reader.
 
         :param measurements: List of measurement descriptors (not just names)
@@ -697,6 +702,10 @@ class MultiProcNetcdfReader(object):
         :param read_chunk: Shape of chunk to use for reading
         :param slot_alloc: Shared slot allocator
         :param dst: Pre-allocated destination storage
+
+        :param on_complete: If supplied will be called when iteration reaches
+        the end, note that this is "finished scheduling work", not "scheduled
+        work finished"
 
         :returns: Iterator that generates None|Future objects, suitable for
         feeding into AsyncDataSink
@@ -709,7 +718,8 @@ class MultiProcNetcdfReader(object):
                                                 measurements,
                                                 slot_alloc,
                                                 read_chunk,
-                                                dst)
+                                                dst,
+                                                on_complete=on_complete)
 
     def read(self,
              measurements=None,
