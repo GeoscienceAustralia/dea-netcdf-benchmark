@@ -323,6 +323,10 @@ class ChunkStoreAlloc(object):
         return self._view.asarray(offset, shape, dtype)
 
 
+def flatmap(f, items):
+    return itertools.chain.from_iterable(map(f, items))
+
+
 def interleave_n(its, n):
     """Given a bunch of iterators iterate through all of them until all exhausted
     extracting values from upto n iterators at a time, it's kind of a mix
