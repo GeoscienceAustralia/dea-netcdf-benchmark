@@ -577,7 +577,9 @@ class MultiProcNetcdfReader(object):
             out[dim.name] = self._get_coords_values(dim, roi)
         return out
 
-    def _empty_coords(self, measurement, src_roi=None):
+    def _empty_coords(self, measurement,
+                      src_roi=None,
+                      overrides=None):
         assert measurement in self._info.bands or measurement in self._info.dims, "No such measurement/dimension"
         if measurement in self._info.dims:
             dims = [self._info.dims[measurement]]
@@ -591,7 +593,11 @@ class MultiProcNetcdfReader(object):
 
         for i, dim in enumerate(dims):
             roi = slice(None, None) if src_roi is None else src_roi[i]
-            shape = shape_from_slice(roi, dim.shape)
+            if overrides is not None and dim.name in overrides:
+                shape = (overrides[dim.name], )
+            else:
+                shape = shape_from_slice(roi, dim.shape)
+
             out[dim.name] = np.zeros(shape, dtype=dim.dtype)
 
         return out
@@ -641,13 +647,18 @@ class MultiProcNetcdfReader(object):
 
         return xr.Dataset({m.name: data_array(m) for m in measurements})
 
-    def allocate(self, measurements=None, src_roi=None, fill_coords=False):
+    def allocate(self, measurements=None, src_roi=None, fill_coords=False, overrides=None):
         """Create `xarray.Dataset`, but not load pixel data yet. Note that it might read
         coordinate data though. Unless it was cached already.
 
         :param [str] measurements: List of measurements
         :param src_roi: Optionally region of interest can be supplied
         :param bool fill_coords: When True fill coordinate values, else leave them at 0
+
+        :param overrides: Optional dictionary mapping dimension name to
+        dimension size, this allows to allocate bigger storage than needed for
+        this file, useful when reading from multiple compatible files. Not
+        compatible with `fill_coords=True` option.
 
         :returns xarray.Dataset:
         :throws IOError: when reading coordinate data fails.
@@ -657,13 +668,12 @@ class MultiProcNetcdfReader(object):
         if src_roi is None:
             src_roi = select_all(src_shape)
 
-        dst_shape = shape_from_slice(src_roi, src_shape)
-
         if fill_coords:
             dims = self.read_coords(measurements[0].name, src_roi)
         else:
-            dims = self._empty_coords(measurements[0].name, src_roi)
+            dims = self._empty_coords(measurements[0].name, src_roi, overrides=overrides)
 
+        dst_shape = tuple(x.shape[0] for x in dims.values())
         return self._allocate(measurements, dst_shape, dims)
 
     @staticmethod
