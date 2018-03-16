@@ -877,6 +877,10 @@ class ReaderFactory(object):
         self._state = SharedState(mb=mb)
         self._procs = self._state.make_procs(num_workers)
 
+    @property
+    def nprocs(self):
+        return len(self._procs)
+
     def open(self, fname, num_workers=None, workers=None):
         """Open file for reading.
 
