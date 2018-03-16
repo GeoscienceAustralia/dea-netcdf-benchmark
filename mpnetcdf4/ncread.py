@@ -368,21 +368,21 @@ class AsyncDataSink(object):
         self._scheduled = set()
 
     @staticmethod
-    def pack_user_data(future, slot, dst, roi):
+    def pack_user_data(future, slot, dst, roi, count):
         # pylint: disable=protected-access
-        future._userdata = (slot, dst, roi)
+        future._userdata = (slot, dst, roi, count)
         return future
 
     @staticmethod
     def unpack_user_data(future):
         # pylint: disable=protected-access
-        slot, dst, roi = future._userdata
-        return (slot, dst, roi)
+        slot, dst, roi, count = future._userdata
+        return (slot, dst, roi, count)
 
     @staticmethod
     def _finalise(future):
         ok = False
-        slot, dst, roi = AsyncDataSink.unpack_user_data(future)
+        slot, dst, roi, count = AsyncDataSink.unpack_user_data(future)
         try:
             if future.result():
                 dst[roi] = slot.view
@@ -393,6 +393,7 @@ class AsyncDataSink(object):
             _LOG.error('Failed with exception one of the reads: %s %d', repr(roi), slot.id)
         finally:
             slot.release()
+            count.count -= 1
 
         return ok
 
@@ -689,10 +690,12 @@ class MultiProcNetcdfReader(object):
                    on_complete=None):
         pack_user_data = AsyncDataSink.pack_user_data
         dst_roi = dst_from_src(src_roi)
+        count = SimpleNamespace(count=0)
 
         def schedule_work(name, roi, slot, dst_array):
             future = read_to_shared(name, roi, slot.offset)
-            return pack_user_data(future, slot, dst_array, dst_roi(roi))
+            count.count += 1
+            return pack_user_data(future, slot, dst_array, dst_roi(roi), count)
 
         def alloc_one(shape, dtype):
 
@@ -718,10 +721,8 @@ class MultiProcNetcdfReader(object):
                 yield from map(mk_worker(m, roi),
                                alloc_one(block_shape, m.dtype))
 
-        n_total, _ = read_to_shared.current_load()
-        while n_total > 0:
+        while count.count > 0:
             yield None
-            n_total, _ = read_to_shared.current_load()
 
         if on_complete is not None:
             on_complete()
@@ -743,10 +744,8 @@ class MultiProcNetcdfReader(object):
 
         :param on_complete: If supplied will be called when iteration reaches
         the end. By the time on_complete is called all the chunks were
-        scheduled and completed by the external process, however pixels might
-        still be in the sink queue to be copied over to the final destination.
-        So it's ok to close file inside the oncomplete method, but not ok to
-        use pixels until you drain the sink.
+        scheduled and completed by the external process and copied to final
+        destination.
 
         :returns: Iterator that generates None|Future objects, suitable for
         feeding into AsyncDataSink
