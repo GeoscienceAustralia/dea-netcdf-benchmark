@@ -927,3 +927,54 @@ def nc_open(fname, num_workers, mb=None):
 
     """
     return ReaderFactory(num_workers, mb=mb).open(fname)
+
+
+def read_vstack(files, mpr, params):
+
+    def prepare(fname, params, n_time):
+        with mpr.open(fname, workers=[0]) as f:
+            bands, src_shape = f.check_measurements(params.measurements)
+
+            src_roi = (np.s_[:], *params.xy_roi)
+            src_roi = norm_selection(src_roi, src_shape)
+
+            slot_alloc, read_chunk = f._init_alloc(bands, params.chunk_scale)
+
+            ds = f.allocate(params.measurements, src_roi, overrides=dict(time=n_time))
+
+            for n, coord in f.read_coords(params.measurements[0], src_roi).items():
+                if ds.coords[n].shape == coord.shape:
+                    ds.coords[n] = coord
+
+            return bands, src_roi[1:], slot_alloc, read_chunk, ds
+
+    def gen_sources(files, bands, xy_roi, slot_alloc, read_chunk, ds):
+        available_procs = [i for i in range(mpr.nprocs)]
+
+        def mk_on_complete(idx, f):
+            def on_complete():
+                available_procs.append(idx)
+                f.close()
+            return on_complete
+
+        for i, fname in enumerate(files):
+            t_roi = slice(i, i + 1, 1)
+            wkid = available_procs.pop()
+            f = mpr.open(fname, workers=(wkid,))
+            ds_subset = ds.isel(time=t_roi)
+            src_roi = (slice(0, 1, 1),) + xy_roi
+
+            yield f.mk_lazy_reader(bands,
+                                   src_roi,
+                                   read_chunk,
+                                   slot_alloc,
+                                   ds_subset,
+                                   on_complete=mk_on_complete(wkid, f))
+
+    sink = AsyncDataSink()
+    bands, xy_roi, slot_alloc, read_chunk, ds = prepare(files[0], params, len(files))
+    sink.pump_many(mpr.nprocs,
+                   gen_sources(files, bands, xy_roi, slot_alloc, read_chunk, ds),
+                   timeout=0.001)
+
+    return ds
