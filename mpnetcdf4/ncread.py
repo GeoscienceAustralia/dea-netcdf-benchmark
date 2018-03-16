@@ -416,11 +416,16 @@ class AsyncDataSink(object):
         """
         self._scheduled.add(future)
 
-    def pump_many(self, n, sources):
+    def pump_many(self, n, sources, timeout=0.05):
         """Consume a bunch of sources up to n of them concurrently.
 
         :param int n: How many sequences to process concurrently
         :param sources: Is a sequence of sequences of future|None values.
+
+        :param float timeout: Timeout in seconds to use when waiting for async
+        futures to complete before giving up and returning to scheduling more
+        work.
+
         """
 
         def wrapped(s):
@@ -431,7 +436,7 @@ class AsyncDataSink(object):
 
         for rr in interleave_n((wrapped(s) for s in sources), n):
             if None in rr:
-                self.process_results(timeout=0.05)
+                self.process_results(timeout=timeout)
 
         self.drain_results_queue()
 
