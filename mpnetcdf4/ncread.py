@@ -304,10 +304,14 @@ class NetcdfProcProxy(object):
         self._info = info
 
     @staticmethod
-    def parallel_open(fname, procs):
+    def parallel_open(fname, procs, info=None):
         fds_futures = [proc.submit(eh5_open, fname) for proc in procs]
         concurrent.futures.wait(fds_futures)
         fds = [f.result() for f in fds_futures]
+
+        if info is not None:
+            return [NetcdfProcProxy(fname, proc, info=info, fd=fd)
+                    for proc, fd in zip(procs, fds)]
 
         # Create first one separately to get info structure
         f = NetcdfProcProxy(fname, procs[0], fd=fds[0])
@@ -444,17 +448,17 @@ class AsyncDataSink(object):
 
 class MultiProcNetcdfReader(object):
     @staticmethod
-    def _prepare(fname, procs):
+    def _prepare(fname, procs, info):
         ff = NetcdfProcProxy.parallel_open(fname, procs)
         return ff, ff[0].info
 
-    def __init__(self, fname, procs, state):
+    def __init__(self, fname, procs, state, info=None):
         """ Don't use directly, see `ReaderFactory.open`
         """
         self._fname = fname
         self._state = state
         (self._ff,
-         self._info) = self._prepare(fname, procs)
+         self._info) = self._prepare(fname, procs, info)
         self._coords = {}
 
     @property
@@ -881,7 +885,7 @@ class ReaderFactory(object):
     def nprocs(self):
         return len(self._procs)
 
-    def open(self, fname, num_workers=None, workers=None):
+    def open(self, fname, num_workers=None, workers=None, info=None):
         """Open file for reading.
 
         :param str fname: path to a netcdf file
@@ -901,7 +905,7 @@ class ReaderFactory(object):
         assert workers is None or isinstance(workers, (tuple, list, slice))
 
         if num_workers is None and workers is None:
-            return MultiProcNetcdfReader(fname, self._procs, self._state)
+            return MultiProcNetcdfReader(fname, self._procs, self._state, info=info)
 
         if workers is None and num_workers is not None:
             assert num_workers <= len(self._procs), "Can't request that many workers"
@@ -912,7 +916,7 @@ class ReaderFactory(object):
         elif isinstance(workers, slice):
             procs = self._procs[workers]
 
-        return MultiProcNetcdfReader(fname, procs, self._state)
+        return MultiProcNetcdfReader(fname, procs, self._state, info=info)
 
 
 def nc_open(fname, num_workers, mb=None):
@@ -946,9 +950,9 @@ def read_vstack(files, mpr, params):
                 if ds.coords[n].shape == coord.shape:
                     ds.coords[n] = coord
 
-            return bands, src_roi[1:], slot_alloc, read_chunk, ds
+            return f.info, bands, src_roi[1:], slot_alloc, read_chunk, ds
 
-    def gen_sources(files, bands, xy_roi, slot_alloc, read_chunk, ds):
+    def gen_sources(files, info, bands, xy_roi, slot_alloc, read_chunk, ds):
         available_procs = [i for i in range(mpr.nprocs)]
 
         def mk_on_complete(idx, f):
@@ -960,7 +964,7 @@ def read_vstack(files, mpr, params):
         for i, fname in enumerate(files):
             t_roi = slice(i, i + 1, 1)
             wkid = available_procs.pop()
-            f = mpr.open(fname, workers=(wkid,))
+            f = mpr.open(fname, workers=(wkid,), info=info)
             ds_subset = ds.isel(time=t_roi)
             src_roi = (slice(0, 1, 1),) + xy_roi
 
@@ -972,9 +976,9 @@ def read_vstack(files, mpr, params):
                                    on_complete=mk_on_complete(wkid, f))
 
     sink = AsyncDataSink()
-    bands, xy_roi, slot_alloc, read_chunk, ds = prepare(files[0], params, len(files))
+    info, bands, xy_roi, slot_alloc, read_chunk, ds = prepare(files[0], params, len(files))
     sink.pump_many(mpr.nprocs,
-                   gen_sources(files, bands, xy_roi, slot_alloc, read_chunk, ds),
-                   timeout=0.001)
+                   gen_sources(files, info, bands, xy_roi, slot_alloc, read_chunk, ds),
+                   timeout=0.05)
 
     return ds
