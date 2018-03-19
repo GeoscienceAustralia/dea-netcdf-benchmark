@@ -711,11 +711,11 @@ class MultiProcNetcdfReader(object):
             count.count += 1
             return pack_user_data(future, slot, dst_array, dst_roi(roi), count)
 
-        def alloc_one(shape, dtype):
+        def alloc_one(shape, dtype, load_thresh):
 
             # Apply back pressure
             _, n_min = read_to_shared.current_load()
-            while n_min > 6:
+            while n_min > load_thresh:
                 yield None
                 _, n_min = read_to_shared.current_load()
 
@@ -729,11 +729,13 @@ class MultiProcNetcdfReader(object):
             return (lambda slot: None if slot is None else
                     schedule_work(m.name, roi, slot, dst[m.name].values))
 
+        max_load_before_yield = len(measurements) * 2
+
         for roi in block_iterator(read_chunk, src_roi):
             block_shape = shape_from_slice(roi)
             for m in measurements:
                 yield from map(mk_worker(m, roi),
-                               alloc_one(block_shape, m.dtype))
+                               alloc_one(block_shape, m.dtype, max_load_before_yield))
 
         while count.count > 0:
             yield None
