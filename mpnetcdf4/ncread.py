@@ -715,7 +715,7 @@ class MultiProcNetcdfReader(object):
 
             # Apply back pressure
             _, n_min = read_to_shared.current_load()
-            while n_min > 3:
+            while n_min > 6:
                 yield None
                 _, n_min = read_to_shared.current_load()
 
