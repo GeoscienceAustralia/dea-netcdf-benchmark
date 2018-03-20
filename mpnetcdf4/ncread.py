@@ -522,7 +522,7 @@ class MultiProcNetcdfReader(object):
 
         return measurements, shapes.pop()
 
-    def _init_alloc(self, measurements, chunk_scale):
+    def init_alloc(self, measurements, chunk_scale):
         dtypes = map(lambda m: np.dtype(m.dtype), measurements)
         dtypes = sorted(dtypes, key=lambda dtype: dtype.itemsize, reverse=True)
         largest_dtype = dtypes[0]
@@ -819,7 +819,7 @@ class MultiProcNetcdfReader(object):
             if update_coords:
                 self.update_coords(dst, src_roi)
 
-        slot_alloc, read_chunk = self._init_alloc(measurements, chunk_scale)
+        slot_alloc, read_chunk = self.init_alloc(measurements, chunk_scale)
 
         read_to_shared = RoundRobinSelector([f.read_to_shared for f in self._ff])
         data_pump_it = MultiProcNetcdfReader._data_pump(read_to_shared,
@@ -944,7 +944,7 @@ def read_vstack(files, mpr, params):
             src_roi = (np.s_[:], *params.xy_roi)
             src_roi = norm_selection(src_roi, src_shape)
 
-            slot_alloc, read_chunk = f._init_alloc(bands, params.chunk_scale)
+            slot_alloc, read_chunk = f.init_alloc(bands, params.chunk_scale)
 
             ds = f.allocate(params.measurements, src_roi, overrides=dict(time=n_time))
 
