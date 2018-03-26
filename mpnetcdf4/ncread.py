@@ -446,6 +446,42 @@ class AsyncDataSink(object):
         self.drain_results_queue()
 
 
+def alloc_empty(shape, bands, info):
+    assert len(bands) > 0
+
+    def _attrs(m):
+        attrs = {}
+        if m.nodata is not None:
+            attrs['nodata'] = m.nodata
+
+        if m.units is not None:
+            attrs['units'] = m.units
+
+        if m.grid_mapping is not None:
+            assert m.grid_mapping in info.grids, "Mismatched grid mapping reference: " + m.grid_mapping
+            grid = info.grids[m.grid_mapping]
+            crs_wkt = grid.get('crs_wkt')
+            if crs_wkt is not None:
+                attrs['crs'] = crs_wkt
+
+        return attrs
+
+    dims = [info.dims[d] for d in bands[0].dims]
+
+    coords = OrderedDict()
+    for n, dim in zip(shape, dims):
+        coords[dim.name] = np.zeros(n, dtype=dim.dtype)
+
+    def data_array(m):
+        return xr.DataArray(np.ndarray(shape, dtype=m.dtype),
+                            name=m.name,
+                            dims=list(coords),
+                            coords=coords,
+                            attrs=_attrs(m))
+
+    return xr.Dataset({m.name: data_array(m) for m in bands})
+
+
 class MultiProcNetcdfReader(object):
     @staticmethod
     def _prepare(fname, procs, info):
@@ -491,6 +527,8 @@ class MultiProcNetcdfReader(object):
 
             if n not in self._coords:
                 self._coords[n] = read(self._info.dims[n])
+
+        return self._coords
 
     def check_measurements(self, measurements):
         """
@@ -935,52 +973,92 @@ def nc_open(fname, num_workers, mb=None):
     return ReaderFactory(num_workers, mb=mb).open(fname)
 
 
-def read_vstack(files, mpr, params):
+class VStackReader(object):
+    @staticmethod
+    def _prepare(fname, mpr, params):
+        """
+        params.measurements
+        params.chunk_scale
+        """
 
-    def prepare(fname, params, n_time):
         with mpr.open(fname, workers=[0]) as f:
             bands, src_shape = f.check_measurements(params.measurements)
 
-            src_roi = (np.s_[:], *params.xy_roi)
-            src_roi = norm_selection(src_roi, src_shape)
-
             slot_alloc, read_chunk = f.init_alloc(bands, params.chunk_scale)
+            coords = {}
+            for dim in bands[0].dims[1:]:
+                coords.update(f.read_coords(dim))
 
-            ds = f.allocate(params.measurements, src_roi, overrides=dict(time=n_time))
+            return SimpleNamespace(info=f.info,
+                                   bands=bands,
+                                   xy_shape=src_shape[1:],
+                                   coords=coords,
+                                   read_chunk=read_chunk,
+                                   slot_alloc=slot_alloc,
+                                   mpr=mpr)
 
-            for n, coord in f.read_coords(params.measurements[0], src_roi).items():
-                if ds.coords[n].shape == coord.shape:
-                    ds.coords[n] = coord
+    def __init__(self, files, mpr, params):
+        self._files = files
+        self._params = params
+        self._state = VStackReader._prepare(files[0], mpr, params)
 
-            return f.info, bands, src_roi[1:], slot_alloc, read_chunk, ds
+    def alloc(self, xy_roi, n_time=None):
+        if n_time is None:
+            n_time = len(self._files)
 
-    def gen_sources(files, info, bands, xy_roi, slot_alloc, read_chunk, ds):
-        available_procs = [i for i in range(mpr.nprocs)]
+        if isinstance(xy_roi[0], int):
+            xy_shape = xy_roi
+        else:
+            xy_shape = shape_from_slice(xy_roi, self._state.xy_shape)
 
-        def mk_on_complete(idx, f):
-            def on_complete():
-                available_procs.append(idx)
-                f.close()
-            return on_complete
+        shape = (n_time, *xy_shape)
+        ds = alloc_empty(shape, self._state.bands, self._state.info)
 
-        for i, fname in enumerate(files):
-            t_roi = slice(i, i + 1, 1)
-            wkid = available_procs.pop()
-            f = mpr.open(fname, workers=(wkid,), info=info)
-            ds_subset = ds.isel(time=t_roi)
-            src_roi = (slice(0, 1, 1),) + xy_roi
+        return ds
 
-            yield f.mk_lazy_reader(bands,
-                                   src_roi,
-                                   read_chunk,
-                                   slot_alloc,
-                                   ds_subset,
-                                   on_complete=mk_on_complete(wkid, f))
+    def read(self, xy_roi, dst=None, nprocs=None):
+        state = self._state
+        mpr = state.mpr
+        info = state.info
 
-    sink = AsyncDataSink()
-    info, bands, xy_roi, slot_alloc, read_chunk, ds = prepare(files[0], params, len(files))
-    sink.pump_many(mpr.nprocs,
-                   gen_sources(files, info, bands, xy_roi, slot_alloc, read_chunk, ds),
-                   timeout=0.05)
+        xy_roi = norm_selection(xy_roi, state.xy_shape)
 
-    return ds
+        if dst is None:
+            dst = self.alloc(xy_roi)
+
+        if nprocs is None:
+            nprocs = mpr.nprocs
+
+        # update coords for common axis
+        for roi, n in zip(xy_roi, state.coords):
+            dst.coords[n] = state.coords[n][roi]
+
+        def gen_sources(nprocs):
+            available_procs = [i for i in range(nprocs)]
+
+            def mk_on_complete(idx, f):
+                def on_complete():
+                    available_procs.append(idx)
+                    f.close()
+                return on_complete
+
+            for i, fname in enumerate(self._files):
+                t_roi = slice(i, i + 1, 1)
+                wkid = available_procs.pop()
+                f = mpr.open(fname, workers=(wkid,), info=info)
+                dst_subset = dst.isel(time=t_roi)
+                src_roi = (slice(0, 1, 1),) + xy_roi
+
+                yield f.mk_lazy_reader(state.bands,
+                                       src_roi,
+                                       state.read_chunk,
+                                       state.slot_alloc,
+                                       dst_subset,
+                                       on_complete=mk_on_complete(wkid, f))
+
+        sink = AsyncDataSink()
+        sink.pump_many(nprocs,
+                       gen_sources(nprocs),
+                       timeout=0.05)
+
+        return dst
