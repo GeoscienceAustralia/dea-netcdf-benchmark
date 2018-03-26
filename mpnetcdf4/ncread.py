@@ -803,7 +803,7 @@ class MultiProcNetcdfReader(object):
         scheduled and completed by the external process and copied to final
         destination.
 
-        :returns: Iterator that generates None|Future objects, suitable for
+        :returns: Iterator that generates None|tuple<Future> objects, suitable for
         feeding into AsyncDataSink
 
         """
