@@ -425,7 +425,7 @@ class AsyncDataSink(object):
         """Consume a bunch of sources up to n of them concurrently.
 
         :param int n: How many sequences to process concurrently
-        :param sources: Is a sequence of sequences of future|None values.
+        :param sources: Is a sequence of sequences of (future,)|None values.
 
         :param float timeout: Timeout in seconds to use when waiting for async
         futures to complete before giving up and returning to scheduling more
@@ -434,14 +434,14 @@ class AsyncDataSink(object):
         """
 
         def wrapped(s):
-            for future in s:
-                if future is not None:
-                    self.add(future)
-                yield future
+            for futures in s:
+                if futures is not None:
+                    for future in futures:
+                        self.add(future)
+                yield futures
 
         for rr in interleave_n((wrapped(s) for s in sources), n):
-            if None in rr:
-                self.process_results(timeout=timeout)
+            self.process_results(timeout=timeout)
 
         self.drain_results_queue()
 
@@ -749,31 +749,33 @@ class MultiProcNetcdfReader(object):
             count.count += 1
             return pack_user_data(future, slot, dst_array, dst_roi(roi), count)
 
-        def alloc_one(shape, dtype, load_thresh):
-
-            # Apply back pressure
-            _, n_min = read_to_shared.current_load()
-            while n_min > load_thresh:
-                yield None
-                _, n_min = read_to_shared.current_load()
-
+        def alloc_one(shape, dtype):
             slot = slot_alloc(shape, dtype)
             while slot is None:
                 yield None
                 slot = slot_alloc(shape, dtype)
             yield slot
 
-        def mk_worker(m, roi):
-            return (lambda slot: None if slot is None else
-                    schedule_work(m.name, roi, slot, dst[m.name].values))
-
         max_load_before_yield = len(measurements) * 2
 
         for roi in block_iterator(read_chunk, src_roi):
             block_shape = shape_from_slice(roi)
+            futures = []
+
+            # Apply back pressure
+            _, n_min = read_to_shared.current_load()
+            while n_min > max_load_before_yield:
+                yield None
+                _, n_min = read_to_shared.current_load()
+
             for m in measurements:
-                yield from map(mk_worker(m, roi),
-                               alloc_one(block_shape, m.dtype, max_load_before_yield))
+                for slot in alloc_one(block_shape, m.dtype):
+                    if slot is None:
+                        yield None
+
+                futures.append(schedule_work(m.name, roi, slot, dst[m.name].values))
+
+            yield tuple(futures)
 
         while count.count > 0:
             yield None
@@ -869,9 +871,10 @@ class MultiProcNetcdfReader(object):
 
         sink = AsyncDataSink()
 
-        for future in data_pump_it:
-            if future is not None:
-                sink.add(future)
+        for futures in data_pump_it:
+            if futures is not None:
+                for future in futures:
+                    sink.add(future)
             else:
                 sink.process_results(timeout=0.05)
 
