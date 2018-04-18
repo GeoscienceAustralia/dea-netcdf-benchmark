@@ -51,18 +51,31 @@ def h5_utf8_attr(f, name):
     return data[()].decode('utf8')
 
 
-def h5_read_utf8(ds):
+def h5_read_utf8(ds, roi=None):
     from h5py import h5t, h5s
     from h5py._hl import selections as sel
 
-    selection = sel.select(ds.shape, slice(None), dsid=ds.id)
+    if roi is None:
+        roi = slice(None)
+
+    selection = sel.select(ds.shape, roi, dsid=ds.id)
     mspace = h5s.create_simple(selection.mshape)
     fspace = selection.id
     mtype = h5t.py_create(ds.dtype)
     mtype.set_cset(1)
 
-    aa = np.ndarray(ds.shape[0], dtype='S{}'.format(selection.mshape[1]))
+    if len(selection.mshape) == 2:
+        shape = (selection.mshape[0],)
+        dtype = 'S{}'.format(selection.mshape[1])
+    elif len(selection.mshape) == 1:
+        shape = ()
+        dtype = 'S{}'.format(selection.mshape[0])
+
+    aa = np.ndarray(shape, dtype=dtype)
     ds._id.read(mspace, fspace, aa, mtype=mtype)
+
+    if shape == ():
+        return aa[()].decode('utf8')
 
     return [a.decode('utf8') for a in aa]
 
