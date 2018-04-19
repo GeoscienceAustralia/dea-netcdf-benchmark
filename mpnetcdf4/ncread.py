@@ -73,11 +73,14 @@ def h5_read_utf8(ds, roi=None):
 
     aa = np.ndarray(shape, dtype=dtype)
     ds._id.read(mspace, fspace, aa, mtype=mtype)
+    aa = np.char.decode(aa, 'utf8')
 
     if shape == ():
-        return aa[()].decode('utf8')
+        # For as single value unwrap array and return just one string
+        return aa[()]
 
-    return [a.decode('utf8') for a in aa]
+    # else slice, keep array
+    return aa
 
 
 def h5_extract_attrs(ds, keys=None, unwrap_arrays=False):
